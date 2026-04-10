@@ -285,17 +285,45 @@ def get_employee_by_number(conn, employee_number: str):
     c.execute("SELECT * FROM employees WHERE employee_number = ?", (employee_number,))
     return c.fetchone()
 
-def get_employee_samples(conn, employee_id: int) -> List[np.ndarray]:
+def get_employee_samples(conn, employee_id: int, identity_id: Optional[int] = None) -> List[np.ndarray]:
+    """
+    Obtiene los embeddings de un empleado.
+    
+    Args:
+        conn: Conexión a BD
+        employee_id: ID del empleado
+        identity_id: ID de la identidad específica (IMPORTANTE para evitar samples corruptos).
+                    Si se proporciona, solo retorna embeddings de esa identidad.
+                    Si NO se proporciona, retorna todos los embeddings del empleado (puede haber corrupción).
+    
+    Returns:
+        Lista de embeddings (numpy arrays)
+    """
     c = conn.cursor()
-    c.execute(
-        """
-        SELECT embedding_json
-        FROM identity_samples
-        WHERE employee_id = ?
-        ORDER BY id DESC
-        """,
-        (employee_id,),
-    )
+    
+    if identity_id is not None:
+        # RECOMENDADO: Filtrar por identity_id específicA (más seguro)
+        c.execute(
+            """
+            SELECT embedding_json
+            FROM identity_samples
+            WHERE employee_id = ? AND identity_id = ?
+            ORDER BY id DESC
+            """,
+            (employee_id, identity_id),
+        )
+    else:
+        # Fallback: Filtrar solo por employee_id (puede retornar samples de identities incorrectas)
+        c.execute(
+            """
+            SELECT embedding_json
+            FROM identity_samples
+            WHERE employee_id = ?
+            ORDER BY id DESC
+            """,
+            (employee_id,),
+        )
+    
     rows = c.fetchall()
     embeddings = []
     for row in rows:

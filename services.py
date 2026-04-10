@@ -133,7 +133,7 @@ def verify_employee_one_to_one(
                 message="La captura no pasó el quality gate.",
             )
 
-        enrolled_embeddings = get_employee_samples(conn, employee_id)
+        enrolled_embeddings = get_employee_samples(conn, employee_id, identity_id)
         if len(enrolled_embeddings) == 0:
             return VerificationResult(
                 matched=False,

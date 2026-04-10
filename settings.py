@@ -29,7 +29,7 @@ class Settings:
 
     # Calibración / operación
     DEFAULT_TARGET_FAR: float = 0.001  # ejemplo operativo
-    DEFAULT_THRESHOLD: float = 0.45  # valor provisional hasta calibrar con tus datos
+    DEFAULT_THRESHOLD: float = 0.40  # Reducido de 0.45 para mayor seguridad tras limpieza de datos
 
     # 1:1 preferido
     REQUIRE_EMPLOYEE_NUMBER_FOR_VERIFICATION: bool = True
