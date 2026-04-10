@@ -1,0 +1,15 @@
+streamlit
+streamlit-webrtc
+opencv-python
+numpy
+pandas
+Pillow
+av
+mediapipe
+insightface
+onnxruntime
+scikit-learn
+matplotlib
+
+# Opcional si todavía mantienes rutas legacy con face_recognition:
+face_recognition
