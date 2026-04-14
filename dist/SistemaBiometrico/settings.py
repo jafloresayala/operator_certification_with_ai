@@ -34,8 +34,12 @@ class Settings:
     # 1:1 preferido
     REQUIRE_EMPLOYEE_NUMBER_FOR_VERIFICATION: bool = True
 
-    # TRAC_MEX API
-    TRACMEX_API_URL: str = "http://nts5512/TracMexApi/api/StationInitialization/Get_User_Access_Status"
+    # TRAC_MEX SQL Server
+    TRACMEX_SERVER: str = "NTS5562"
+    TRACMEX_DATABASE: str = "TRAC_MEX"
+    TRACMEX_USER: str = "tracmex_reader"
+    TRACMEX_PASSWORD: str = r"GK<A{@g5n!"
+    TRACMEX_APP_NAME: str = "TracMexApi"
 
 
 SETTINGS = Settings()

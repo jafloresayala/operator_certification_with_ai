@@ -11,6 +11,8 @@ onnxruntime
 scikit-learn
 matplotlib
 
+# Conexión SQL Server (TRAC_MEX)
+pyodbc
 requests
 
 # Auto-refresh para verificación en tiempo real

@@ -26,11 +26,6 @@ class BiometricEngine(ABC):
         """Detecta, alinea y extrae embedding + quality."""
         raise NotImplementedError
 
-    def extract_all(self, image_bgr: np.ndarray) -> List[ExtractedFace]:
-        """Detecta y extrae TODOS los rostros de la imagen. Por defecto usa extract()."""
-        single = self.extract(image_bgr)
-        return [single] if single else []
-
     @abstractmethod
     def verify_one_to_one(
         self,
@@ -178,19 +173,27 @@ class ArcFaceEngine(BiometricEngine):
             
             # Usar el rostro más grande
             largest_face = max(faces, key=lambda f: (f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1]))
-            return self._face_to_extracted(image_bgr, largest_face)
-        except Exception as e:
-            print(f"Error en extracción: {e}")
-            return None
-
-    def _face_to_extracted(self, image_bgr: np.ndarray, face) -> Optional[ExtractedFace]:
-        """Convierte un objeto face de InsightFace a ExtractedFace."""
-        try:
-            x1, y1, x2, y2 = int(face.bbox[0]), int(face.bbox[1]), int(face.bbox[2]), int(face.bbox[3])
+            
+            # Extraer coordenadas
+            x1, y1, x2, y2 = largest_face.bbox[:4]
+            x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
+            
+            # Crear FaceBox
             face_box = FaceBox(top=y1, bottom=y2, left=x1, right=x2)
+            
+            # Verificar calidad
             quality = self._check_image_quality(image_bgr, face_box)
-            aligned_face = cv2.resize(image_bgr[y1:y2, x1:x2].copy(), (112, 112))
-            embedding = face.embedding.astype(np.float32)
+            
+            # Extraer rostro alineado (usando landmarks implícitos del modelo)
+            # InsightFace ya realiza la alineación internamente
+            aligned_face = image_bgr[y1:y2, x1:x2].copy()
+            
+            # Normalizar a tamaño estándar (112x112 para ArcFace)
+            aligned_face = cv2.resize(aligned_face, (112, 112))
+            
+            # El embedding ya está disponible desde el modelo
+            embedding = largest_face.embedding.astype(np.float32)
+            
             return ExtractedFace(
                 aligned_face_bgr=aligned_face,
                 face_box=face_box,
@@ -198,24 +201,8 @@ class ArcFaceEngine(BiometricEngine):
                 quality=quality,
             )
         except Exception as e:
-            print(f"Error convirtiendo face: {e}")
+            print(f"Error en extracción: {e}")
             return None
-
-    def extract_all(self, image_bgr: np.ndarray) -> List[ExtractedFace]:
-        """Extrae TODOS los rostros detectados en la imagen."""
-        try:
-            faces = self.app.get(image_bgr)
-            if not faces:
-                return []
-            results = []
-            for face in faces:
-                extracted = self._face_to_extracted(image_bgr, face)
-                if extracted is not None:
-                    results.append(extracted)
-            return results
-        except Exception as e:
-            print(f"Error en extract_all: {e}")
-            return []
     
     def verify_one_to_one(
         self,
@@ -371,28 +358,6 @@ class SimpleEmbeddingEngine(BiometricEngine):
         except Exception as e:
             print(f"Error en face_recognition: {e}")
             return None
-
-    def extract_all(self, image_bgr: np.ndarray) -> List[ExtractedFace]:
-        """Extrae TODOS los rostros detectados en la imagen."""
-        try:
-            rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
-            face_locations = face_recognition.face_locations(rgb, model="hog")
-            face_encodings = face_recognition.face_encodings(rgb, face_locations)
-            results = []
-            for (top, right, bottom, left), encoding in zip(face_locations, face_encodings):
-                face_box = FaceBox(top=top, bottom=bottom, left=left, right=right)
-                quality = self._check_image_quality(image_bgr, face_box)
-                aligned_face = cv2.resize(image_bgr[top:bottom, left:right].copy(), (112, 112))
-                results.append(ExtractedFace(
-                    aligned_face_bgr=aligned_face,
-                    face_box=face_box,
-                    embedding=encoding.astype(np.float32),
-                    quality=quality,
-                ))
-            return results
-        except Exception as e:
-            print(f"Error en extract_all face_recognition: {e}")
-            return []
     
     def verify_one_to_one(
         self,

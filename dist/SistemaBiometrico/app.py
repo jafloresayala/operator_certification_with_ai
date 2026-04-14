@@ -1585,28 +1585,45 @@ def send_to_pi(employee_number: str, access_granted: bool) -> dict:
 def check_tracmex_access(employee_number: str, process_id: int = 50048,
                          operacion: int = 1, in_part_number: str = "0",
                          parameter_name: str = "TRESS Certification") -> dict:
-    """Consulta Get_User_Access_Status via HTTP API y devuelve {passed, message, error}."""
-    import requests
+    """Consulta spGET_User_Acces_Status y devuelve {passed, message, error}."""
+    import pyodbc
 
+    conn_str = (
+        f"DRIVER={{ODBC Driver 17 for SQL Server}};"
+        f"SERVER={SETTINGS.TRACMEX_SERVER};"
+        f"DATABASE={SETTINGS.TRACMEX_DATABASE};"
+        f"UID={SETTINGS.TRACMEX_USER};"
+        f"PWD={SETTINGS.TRACMEX_PASSWORD};"
+        f"APP={SETTINGS.TRACMEX_APP_NAME};"
+    )
     try:
-        params = {
-            "user_id": employee_number,
-            "process_id": process_id,
-            "Operacion": operacion,
-            "parameter_name": parameter_name,
-        }
-        headers = {"Accept": "application/json"}
-        resp = requests.get(SETTINGS.TRACMEX_API_URL, params=params,
-                            headers=headers, timeout=10)
-        resp.raise_for_status()
+        conn = pyodbc.connect(conn_str, timeout=10)
+        cursor = conn.cursor()
+        sql = """
+            DECLARE @ReturnMessage varchar(150),
+                    @PassedValidation int;
 
-        data = resp.json()
-        # La API devuelve un array: [{"PassedValidation":1,"ReturnMessage":"..."}]
-        item = data[0] if isinstance(data, list) and len(data) > 0 else data
-        passed_val = int(item.get("PassedValidation", 0))
-        message = item.get("ReturnMessage") or "Sin mensaje"
+            EXEC dbo.spGET_User_Acces_Status
+                @user_id = ?,
+                @process_id = ?,
+                @Operacion = ?,
+                @In_Part_Number = ?,
+                @parameter_name = ?,
+                @ReturnMessage = @ReturnMessage OUTPUT,
+                @PassedValidation = @PassedValidation OUTPUT;
 
-        return {"passed": passed_val == 1, "message": message, "error": None}
+            SELECT @ReturnMessage AS ReturnMessage,
+                   @PassedValidation AS PassedValidation;
+        """
+        cursor.execute(sql, employee_number, process_id, operacion,
+                       in_part_number, parameter_name)
+        row = cursor.fetchone()
+        conn.close()
+
+        if row:
+            passed = int(row[1]) == 1 if row[1] is not None else False
+            return {"passed": passed, "message": row[0] or "Sin mensaje", "error": None}
+        return {"passed": False, "message": "Sin resultado", "error": None}
     except Exception as e:
         return {"passed": False, "message": None, "error": str(e)}
 
@@ -1615,6 +1632,8 @@ def render_tracmex_section():
     """Sección para consultar el estatus de acceso de un usuario en TRAC_MEX."""
     st.header("Consulta TRAC_MEX - Estatus de Acceso")
 
+    import pyodbc
+
     with st.form("tracmex_form"):
         col1, col2 = st.columns(2)
         with col1:
@@ -1622,6 +1641,7 @@ def render_tracmex_section():
             process_id = st.number_input("Process ID", value=50048, step=1)
             operacion = st.number_input("Operación", value=1, step=1)
         with col2:
+            in_part_number = st.text_input("Part Number", value="0")
             parameter_name = st.text_input("Parameter Name", value="TRESS Certification")
 
         submitted = st.form_submit_button("Consultar Estatus", use_container_width=True)
@@ -1631,24 +1651,67 @@ def render_tracmex_section():
             st.error("Ingrese un User ID válido.")
             return
 
+        conn_str = (
+            f"DRIVER={{ODBC Driver 17 for SQL Server}};"
+            f"SERVER={SETTINGS.TRACMEX_SERVER};"
+            f"DATABASE={SETTINGS.TRACMEX_DATABASE};"
+            f"UID={SETTINGS.TRACMEX_USER};"
+            f"PWD={SETTINGS.TRACMEX_PASSWORD};"
+            f"APP={SETTINGS.TRACMEX_APP_NAME};"
+        )
+
         try:
-            with st.spinner("Consultando TRAC_MEX API..."):
-                result = check_tracmex_access(
-                    employee_number=user_id.strip(),
-                    process_id=int(process_id),
-                    operacion=int(operacion),
-                    parameter_name=parameter_name.strip(),
+            with st.spinner("Conectando a TRAC_MEX..."):
+                conn = pyodbc.connect(conn_str, timeout=10)
+                cursor = conn.cursor()
+
+                sql = """
+                    DECLARE @ReturnMessage varchar(150),
+                            @PassedValidation int;
+
+                    EXEC dbo.spGET_User_Acces_Status
+                        @user_id = ?,
+                        @process_id = ?,
+                        @Operacion = ?,
+                        @In_Part_Number = ?,
+                        @parameter_name = ?,
+                        @ReturnMessage = @ReturnMessage OUTPUT,
+                        @PassedValidation = @PassedValidation OUTPUT;
+
+                    SELECT @ReturnMessage AS ReturnMessage,
+                           @PassedValidation AS PassedValidation;
+                """
+                cursor.execute(
+                    sql,
+                    user_id.strip(),
+                    int(process_id),
+                    int(operacion),
+                    in_part_number.strip(),
+                    parameter_name.strip(),
                 )
 
-            if result["error"]:
-                st.error(f"Error: {result['error']}")
-            else:
-                st.subheader("Resultado")
-                icon = "✅" if result["passed"] else "❌"
-                st.metric("PassedValidation", f"{icon} {1 if result['passed'] else 0}")
-                st.markdown("**ReturnMessage:**")
-                st.info(result["message"])
+                # Leer columnas de resultado (ReturnMessage, PassedValidation)
+                row = cursor.fetchone()
+                conn.close()
 
+            if row:
+                return_message = row[0] if row[0] is not None else "Sin mensaje"
+                passed_validation = row[1] if len(row) > 1 else None
+
+                st.subheader("Resultado")
+                if passed_validation is not None:
+                    icon = "✅" if int(passed_validation) == 1 else "❌"
+                    st.metric("PassedValidation", f"{icon} {passed_validation}")
+                else:
+                    st.metric("PassedValidation", "N/A")
+
+                st.markdown("**ReturnMessage:**")
+                st.info(return_message)
+            else:
+                st.warning("El procedimiento no devolvió resultados.")
+
+        except pyodbc.Error as e:
+            st.error(f"Error de conexión/consulta: {e}")
         except Exception as e:
             st.error(f"Error inesperado: {e}")
 
@@ -1665,6 +1728,7 @@ def capture_frame_from_camera(camera_index: int = 0) -> Optional[np.ndarray]:
         return None
     finally:
         cap.release()
+
 
 def render_operator_section():
     """Sección para operadores: verificación en tiempo real con video continuo."""

@@ -108,9 +108,8 @@ def verify_employee_one_to_one(
         employee_id = int(employee["id"])
         identity_id = int(employee["face_identity_id"]) if employee["face_identity_id"] else None
 
-        # Extraer TODOS los rostros de la imagen
-        all_extracted = engine.extract_all(frame_bgr)
-        if not all_extracted:
+        extracted = engine.extract(frame_bgr)
+        if extracted is None:
             return VerificationResult(
                 matched=False,
                 identity_id=identity_id,
@@ -122,6 +121,18 @@ def verify_employee_one_to_one(
                 message="No fue posible extraer un rostro válido.",
             )
 
+        if not extracted.quality.passed:
+            return VerificationResult(
+                matched=False,
+                identity_id=identity_id,
+                employee_id=employee_id,
+                distance=None,
+                threshold_used=threshold,
+                liveness=liveness_result,
+                quality=extracted.quality,
+                message="La captura no pasó el quality gate.",
+            )
+
         enrolled_embeddings = get_employee_samples(conn, employee_id, identity_id)
         if len(enrolled_embeddings) == 0:
             return VerificationResult(
@@ -131,61 +142,33 @@ def verify_employee_one_to_one(
                 distance=None,
                 threshold_used=threshold,
                 liveness=liveness_result,
-                quality=all_extracted[0].quality,
+                quality=extracted.quality,
                 message="No hay plantillas enroladas para este empleado.",
             )
 
-        # Probar CADA rostro detectado contra las plantillas del empleado
-        best_result = None
-        best_distance = float('inf')
-
-        for extracted in all_extracted:
-            result = engine.verify_one_to_one(
-                probe_embedding=extracted.embedding,
-                enrolled_embeddings=enrolled_embeddings,
-                threshold=threshold,
-                liveness=liveness_result,
-            )
-
-            # Guardar el mejor resultado (menor distancia)
-            if result.distance is not None and result.distance < best_distance:
-                best_distance = result.distance
-                best_result = result
-                best_result.quality = extracted.quality
-
-            # Si alguno coincide, usar ese inmediatamente
-            if result.matched:
-                best_result = result
-                best_result.quality = extracted.quality
-                break
-
-        if best_result is None:
-            best_result = VerificationResult(
-                matched=False,
-                identity_id=identity_id,
-                employee_id=employee_id,
-                distance=None,
-                threshold_used=threshold,
-                liveness=liveness_result,
-                quality=all_extracted[0].quality,
-                message="No fue posible verificar ningún rostro.",
-            )
+        result = engine.verify_one_to_one(
+            probe_embedding=extracted.embedding,
+            enrolled_embeddings=enrolled_embeddings,
+            threshold=threshold,
+            liveness=liveness_result,
+        )
 
         # completar ids
-        best_result.employee_id = employee_id
-        best_result.identity_id = identity_id
+        result.employee_id = employee_id
+        result.identity_id = identity_id
+        result.quality = extracted.quality
 
         log_verification(
             conn=conn,
             employee_id=employee_id,
             identity_id=identity_id,
-            distance=best_result.distance,
+            distance=result.distance,
             threshold_used=threshold,
-            matched=best_result.matched,
-            quality_json=best_result.quality.__dict__ if best_result.quality else {},
+            matched=result.matched,
+            quality_json=extracted.quality.__dict__ if extracted.quality else {},
             liveness_json=liveness_result.__dict__ if liveness_result else {},
             source="streamlit_ui_1to1",
         )
-        return best_result
+        return result
     finally:
         conn.close()
