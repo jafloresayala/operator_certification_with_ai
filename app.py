@@ -987,9 +987,20 @@ def render_verify_section():
 
             # Interfaz mejorada y amigable para usuarios no técnicos
             st.divider()
+
+            # --- Doble verificación: Rostro + TRAC_MEX ---
+            tracmex_result = None
+            if result.matched:
+                with st.spinner("🔄 Verificando certificación en TRAC_MEX..."):
+                    tracmex_result = check_tracmex_access(employee_number.strip())
+
+            # Determinar acceso final
+            face_ok = result.matched
+            tracmex_ok = tracmex_result["passed"] if tracmex_result else False
+            access_granted = face_ok and tracmex_ok
             
             # Resultado principal - GRANDE Y CLARO
-            if result.matched:
+            if access_granted:
                 st.success("✅ VERIFICACIÓN EXITOSA")
                 st.markdown("""
                 <div style="text-align: center; font-size: 24px; margin: 20px 0;">
@@ -1003,6 +1014,27 @@ def render_verify_section():
                     <span style="color: red; font-weight: bold;">ACCESO DENEGADO</span>
                 </div>
                 """, unsafe_allow_html=True)
+
+            # Detalle de cada verificación
+            st.subheader("📋 Detalle de Verificación")
+            vc1, vc2 = st.columns(2)
+            with vc1:
+                if face_ok:
+                    st.success("✅ Rostro: Coincide con el empleado")
+                else:
+                    st.error("❌ Rostro: No coincide con el empleado")
+            with vc2:
+                if tracmex_result is None:
+                    st.warning("⚠️ TRAC_MEX: No consultado (rostro no coincidió)")
+                elif tracmex_result.get("error"):
+                    st.error(f"❌ TRAC_MEX: Error de conexión - {tracmex_result['error']}")
+                elif tracmex_ok:
+                    st.success("✅ TRAC_MEX: Certificación válida")
+                else:
+                    st.error("❌ TRAC_MEX: Certificación no válida")
+
+            if tracmex_result and tracmex_result.get("message"):
+                st.info(f"**TRAC_MEX:** {tracmex_result['message']}")
             
             st.divider()
             
@@ -1518,6 +1550,140 @@ def render_database_section():
     conn.close()
 
 
+def check_tracmex_access(employee_number: str, process_id: int = 50048,
+                         operacion: int = 1, in_part_number: str = "0",
+                         parameter_name: str = "TRESS Certification") -> dict:
+    """Consulta spGET_User_Acces_Status y devuelve {passed, message, error}."""
+    import pyodbc
+
+    conn_str = (
+        f"DRIVER={{ODBC Driver 17 for SQL Server}};"
+        f"SERVER={SETTINGS.TRACMEX_SERVER};"
+        f"DATABASE={SETTINGS.TRACMEX_DATABASE};"
+        f"UID={SETTINGS.TRACMEX_USER};"
+        f"PWD={SETTINGS.TRACMEX_PASSWORD};"
+        f"APP={SETTINGS.TRACMEX_APP_NAME};"
+    )
+    try:
+        conn = pyodbc.connect(conn_str, timeout=10)
+        cursor = conn.cursor()
+        sql = """
+            DECLARE @ReturnMessage varchar(150),
+                    @PassedValidation int;
+
+            EXEC dbo.spGET_User_Acces_Status
+                @user_id = ?,
+                @process_id = ?,
+                @Operacion = ?,
+                @In_Part_Number = ?,
+                @parameter_name = ?,
+                @ReturnMessage = @ReturnMessage OUTPUT,
+                @PassedValidation = @PassedValidation OUTPUT;
+
+            SELECT @ReturnMessage AS ReturnMessage,
+                   @PassedValidation AS PassedValidation;
+        """
+        cursor.execute(sql, employee_number, process_id, operacion,
+                       in_part_number, parameter_name)
+        row = cursor.fetchone()
+        conn.close()
+
+        if row:
+            passed = int(row[1]) == 1 if row[1] is not None else False
+            return {"passed": passed, "message": row[0] or "Sin mensaje", "error": None}
+        return {"passed": False, "message": "Sin resultado", "error": None}
+    except Exception as e:
+        return {"passed": False, "message": None, "error": str(e)}
+
+
+def render_tracmex_section():
+    """Sección para consultar el estatus de acceso de un usuario en TRAC_MEX."""
+    st.header("Consulta TRAC_MEX - Estatus de Acceso")
+
+    import pyodbc
+
+    with st.form("tracmex_form"):
+        col1, col2 = st.columns(2)
+        with col1:
+            user_id = st.text_input("User ID (No. Empleado)", value="", placeholder="Ej: 50003012")
+            process_id = st.number_input("Process ID", value=50048, step=1)
+            operacion = st.number_input("Operación", value=1, step=1)
+        with col2:
+            in_part_number = st.text_input("Part Number", value="0")
+            parameter_name = st.text_input("Parameter Name", value="TRESS Certification")
+
+        submitted = st.form_submit_button("Consultar Estatus", use_container_width=True)
+
+    if submitted:
+        if not user_id.strip():
+            st.error("Ingrese un User ID válido.")
+            return
+
+        conn_str = (
+            f"DRIVER={{ODBC Driver 17 for SQL Server}};"
+            f"SERVER={SETTINGS.TRACMEX_SERVER};"
+            f"DATABASE={SETTINGS.TRACMEX_DATABASE};"
+            f"UID={SETTINGS.TRACMEX_USER};"
+            f"PWD={SETTINGS.TRACMEX_PASSWORD};"
+            f"APP={SETTINGS.TRACMEX_APP_NAME};"
+        )
+
+        try:
+            with st.spinner("Conectando a TRAC_MEX..."):
+                conn = pyodbc.connect(conn_str, timeout=10)
+                cursor = conn.cursor()
+
+                sql = """
+                    DECLARE @ReturnMessage varchar(150),
+                            @PassedValidation int;
+
+                    EXEC dbo.spGET_User_Acces_Status
+                        @user_id = ?,
+                        @process_id = ?,
+                        @Operacion = ?,
+                        @In_Part_Number = ?,
+                        @parameter_name = ?,
+                        @ReturnMessage = @ReturnMessage OUTPUT,
+                        @PassedValidation = @PassedValidation OUTPUT;
+
+                    SELECT @ReturnMessage AS ReturnMessage,
+                           @PassedValidation AS PassedValidation;
+                """
+                cursor.execute(
+                    sql,
+                    user_id.strip(),
+                    int(process_id),
+                    int(operacion),
+                    in_part_number.strip(),
+                    parameter_name.strip(),
+                )
+
+                # Leer columnas de resultado (ReturnMessage, PassedValidation)
+                row = cursor.fetchone()
+                conn.close()
+
+            if row:
+                return_message = row[0] if row[0] is not None else "Sin mensaje"
+                passed_validation = row[1] if len(row) > 1 else None
+
+                st.subheader("Resultado")
+                if passed_validation is not None:
+                    icon = "✅" if int(passed_validation) == 1 else "❌"
+                    st.metric("PassedValidation", f"{icon} {passed_validation}")
+                else:
+                    st.metric("PassedValidation", "N/A")
+
+                st.markdown("**ReturnMessage:**")
+                st.info(return_message)
+            else:
+                st.warning("El procedimiento no devolvió resultados.")
+
+        except pyodbc.Error as e:
+            st.error(f"Error de conexión/consulta: {e}")
+        except Exception as e:
+            st.error(f"Error inesperado: {e}")
+
+
 def main():
     init_db()
 
@@ -1534,6 +1700,7 @@ def main():
             "Verificación 1:1",
             "Gestión de Registros",
             "Calibración",
+            "TRAC_MEX",
             "DB",
         ],
     )
@@ -1546,6 +1713,8 @@ def main():
         render_management_section()
     elif menu == "Calibración":
         render_calibration_section()
+    elif menu == "TRAC_MEX":
+        render_tracmex_section()
     elif menu == "DB":
         render_database_section()
 

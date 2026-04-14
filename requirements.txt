@@ -11,5 +11,8 @@ onnxruntime
 scikit-learn
 matplotlib
 
+# Conexión SQL Server (TRAC_MEX)
+pyodbc
+
 # Opcional si todavía mantienes rutas legacy con face_recognition:
 face_recognition

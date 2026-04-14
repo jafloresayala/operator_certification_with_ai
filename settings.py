@@ -34,6 +34,13 @@ class Settings:
     # 1:1 preferido
     REQUIRE_EMPLOYEE_NUMBER_FOR_VERIFICATION: bool = True
 
+    # TRAC_MEX SQL Server
+    TRACMEX_SERVER: str = "NTS5562"
+    TRACMEX_DATABASE: str = "TRAC_MEX"
+    TRACMEX_USER: str = "tracmex_reader"
+    TRACMEX_PASSWORD: str = r"GK<A{@g5n!"
+    TRACMEX_APP_NAME: str = "TracMexApi"
+
 
 SETTINGS = Settings()
 
