@@ -13,7 +13,7 @@ from streamlit_webrtc import webrtc_streamer, WebRtcMode, VideoProcessorBase
 from PIL import Image
 
 from settings import SETTINGS
-from repository import init_db, list_employees_df
+from repository import init_db, list_employees_df, get_employee_by_number, get_db_connection as _get_db_conn
 from services import enroll_sample_for_employee, verify_employee_one_to_one
 from biometric_engine import ArcFaceEngine
 from biometric_models import LivenessResult
@@ -1006,10 +1006,17 @@ def render_verify_section():
 
             # Resultado principal - GRANDE Y CLARO
             if access_granted:
+                # Obtener nombre del empleado
+                _conn = _get_db_conn()
+                _emp = get_employee_by_number(_conn, employee_number.strip())
+                _conn.close()
+                emp_name = _emp["name"] if _emp else "Desconocido"
+
                 st.success("✅ VERIFICACIÓN EXITOSA")
-                st.markdown("""
+                st.markdown(f"""
                 <div style="text-align: center; font-size: 24px; margin: 20px 0;">
-                    <span style="color: green; font-weight: bold;">ACCESO PERMITIDO</span>
+                    <span style="color: green; font-weight: bold;">ACCESO PERMITIDO</span><br>
+                    <span style="font-size: 20px;">👤 {emp_name}</span>
                 </div>
                 """, unsafe_allow_html=True)
             else:
@@ -1812,7 +1819,11 @@ def render_operator_section():
                 # Actualizar panel de resultados
                 with status_placeholder.container():
                     if access_granted:
-                        st.success("## ✅ ACCESO PERMITIDO")
+                        _conn = _get_db_conn()
+                        _emp = get_employee_by_number(_conn, employee_number)
+                        _conn.close()
+                        emp_name = _emp["name"] if _emp else "Desconocido"
+                        st.success(f"## ✅ ACCESO PERMITIDO\n### 👤 {emp_name}")
                     else:
                         st.error("## ❌ ACCESO DENEGADO")
 
