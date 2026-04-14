@@ -15,5 +15,8 @@ matplotlib
 pyodbc
 requests
 
+# Auto-refresh para verificación en tiempo real
+streamlit-autorefresh
+
 # Opcional si todavía mantienes rutas legacy con face_recognition:
 face_recognition
