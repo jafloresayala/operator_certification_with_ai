@@ -13,6 +13,7 @@ matplotlib
 
 # Conexión SQL Server (TRAC_MEX)
 pyodbc
+requests
 
 # Opcional si todavía mantienes rutas legacy con face_recognition:
 face_recognition

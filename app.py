@@ -998,7 +998,11 @@ def render_verify_section():
             face_ok = result.matched
             tracmex_ok = tracmex_result["passed"] if tracmex_result else False
             access_granted = face_ok and tracmex_ok
-            
+
+            # Enviar resultado a PI
+            with st.spinner("📡 Enviando resultado a PI..."):
+                pi_result = send_to_pi(employee_number.strip(), access_granted)
+
             # Resultado principal - GRANDE Y CLARO
             if access_granted:
                 st.success("✅ VERIFICACIÓN EXITOSA")
@@ -1035,7 +1039,15 @@ def render_verify_section():
 
             if tracmex_result and tracmex_result.get("message"):
                 st.info(f"**TRAC_MEX:** {tracmex_result['message']}")
-            
+
+            # Resultado de PI
+            if pi_result.get("ok"):
+                st.success(f"📡 PI: Dato enviado correctamente (ME14752-RHE.User|{employee_number.strip() if access_granted else '0'})")
+            elif pi_result.get("error"):
+                st.error(f"📡 PI: Error de conexión - {pi_result['error']}")
+            else:
+                st.error(f"📡 PI: Error HTTP {pi_result['status']}")
+
             st.divider()
             
             # Información del empleado verificado
@@ -1548,6 +1560,25 @@ def render_database_section():
                 st.info("No hay ubicaciones")
     
     conn.close()
+
+
+def send_to_pi(employee_number: str, access_granted: bool) -> dict:
+    """Envía el resultado de verificación al PI Web Service."""
+    import requests
+
+    value = employee_number if access_granted else "0"
+    tag_and_value = f"ME14752-RHE.User|{value}"
+
+    try:
+        resp = requests.post(
+            "http://nts5111/PI_FunctionalWS/PIWebService.asmx/Send_Functional_Master_To_PI",
+            data={"tag_and_value": tag_and_value},
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            timeout=10,
+        )
+        return {"ok": resp.status_code == 200, "status": resp.status_code, "body": resp.text, "error": None}
+    except Exception as e:
+        return {"ok": False, "status": None, "body": None, "error": str(e)}
 
 
 def check_tracmex_access(employee_number: str, process_id: int = 50048,
