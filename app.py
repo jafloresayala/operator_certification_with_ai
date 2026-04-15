@@ -1739,11 +1739,23 @@ def render_operator_section():
         status_placeholder.error("❌ Motor biométrico no disponible.")
         return
 
-    # Abrir cámara
-    cap = cv2.VideoCapture(0)
-    if not cap.isOpened():
+    # Abrir cámara con reintentos (la cámara puede tardar en inicializar)
+    cap = None
+    for attempt in range(5):
+        cap = cv2.VideoCapture(0)
+        if cap.isOpened():
+            break
+        cap.release()
+        cap = None
+        time.sleep(0.5)
+
+    if cap is None or not cap.isOpened():
         status_placeholder.error("❌ No se pudo acceder a la cámara.")
         return
+
+    # Descartar los primeros frames (la cámara puede devolver frames negros al inicio)
+    for _ in range(10):
+        cap.read()
 
     threshold = float(SETTINGS.DEFAULT_THRESHOLD)
     last_verify_time = 0.0
@@ -1756,8 +1768,8 @@ def render_operator_section():
         while cap.isOpened():
             ret, frame_bgr = cap.read()
             if not ret:
-                frame_placeholder.error("❌ Error al leer la cámara.")
-                break
+                time.sleep(0.05)
+                continue
 
             now = time.time()
 
