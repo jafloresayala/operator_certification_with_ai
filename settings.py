@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 import os
+import json
 
 @dataclass(frozen=True)
 class Settings:
@@ -36,6 +37,7 @@ class Settings:
 
     # TRAC_MEX API
     TRACMEX_API_URL: str = "http://nts5512/TracMexApi/api/StationInitialization/Get_User_Access_Status"
+    TRACMEX_DEFAULT_PROCESS_ID: int = 50048
 
 
 SETTINGS = Settings()
@@ -43,3 +45,28 @@ SETTINGS = Settings()
 # Asegurarse de que los directorios existen
 os.makedirs(SETTINGS._data_dir, exist_ok=True)
 os.makedirs(SETTINGS.REF_IMAGES_DIR, exist_ok=True)
+
+# --- Configuración persistente en data/config.json ---
+_CONFIG_PATH = os.path.join(SETTINGS._data_dir, "config.json")
+
+def _load_config() -> dict:
+    if os.path.exists(_CONFIG_PATH):
+        try:
+            with open(_CONFIG_PATH, "r") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+def _save_config(cfg: dict):
+    with open(_CONFIG_PATH, "w") as f:
+        json.dump(cfg, f, indent=2)
+
+def get_tracmex_process_id() -> int:
+    cfg = _load_config()
+    return int(cfg.get("tracmex_process_id", SETTINGS.TRACMEX_DEFAULT_PROCESS_ID))
+
+def set_tracmex_process_id(pid: int):
+    cfg = _load_config()
+    cfg["tracmex_process_id"] = pid
+    _save_config(cfg)

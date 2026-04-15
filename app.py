@@ -12,7 +12,7 @@ from typing import List, Optional, Tuple, Dict, Any
 from streamlit_webrtc import webrtc_streamer, WebRtcMode, VideoProcessorBase
 from PIL import Image
 
-from settings import SETTINGS
+from settings import SETTINGS, get_tracmex_process_id, set_tracmex_process_id
 from repository import init_db, list_employees_df, get_employee_by_number, get_db_connection as _get_db_conn
 from services import enroll_sample_for_employee, verify_employee_one_to_one, identify_faces_in_frame
 from biometric_engine import ArcFaceEngine
@@ -1660,6 +1660,34 @@ def render_tracmex_section():
             st.error(f"Error inesperado: {e}")
 
 
+def render_tracmex_config_section():
+    """Sección de administrador para configurar el Process ID de TRAC_MEX."""
+    st.header("⚙️ Configuración TRAC_MEX")
+    st.info(
+        "Configura el **Process ID** que se usará en la validación automática del operador. "
+        "Este valor se guarda de forma persistente y el operador **no puede modificarlo**."
+    )
+
+    current_pid = get_tracmex_process_id()
+
+    st.metric("Process ID actual", current_pid)
+
+    st.markdown("---")
+    st.subheader("Cambiar Process ID")
+
+    new_pid = st.number_input(
+        "Nuevo Process ID",
+        value=current_pid,
+        step=1,
+        key="admin_tracmex_pid",
+    )
+
+    if st.button("💾 Guardar Process ID", type="primary", use_container_width=True):
+        set_tracmex_process_id(int(new_pid))
+        st.success(f"✅ Process ID actualizado a **{int(new_pid)}**")
+        st.rerun()
+
+
 def capture_frame_from_camera(camera_index: int = 0) -> Optional[np.ndarray]:
     """Captura un frame de la cámara local usando OpenCV. Abre, captura y cierra."""
     cap = cv2.VideoCapture(camera_index)
@@ -1680,6 +1708,9 @@ def render_operator_section():
     # --- Inicializar estado (siempre activo) ---
     if "operator_active" not in st.session_state:
         st.session_state.operator_active = True
+
+    # Process ID leído de config persistente (solo admin puede cambiarlo)
+    process_id = get_tracmex_process_id()
 
     col_header, col_stop = st.columns([3, 1])
     with col_header:
@@ -1775,7 +1806,7 @@ def render_operator_section():
 
                     if r["matched"] and r["employee_number"]:
                         # Consultar TRAC_MEX para este empleado
-                        tr = check_tracmex_access(r["employee_number"])
+                        tr = check_tracmex_access(r["employee_number"], process_id=process_id)
                         if tr["passed"]:
                             entry["certified"] = True
                             if certified_employee is None:
@@ -1799,29 +1830,34 @@ def render_operator_section():
                     pi_msg = f"❌ HTTP {pi_result['status']}"
 
                 # --- Actualizar panel de resultados ---
-                with status_placeholder.container():
-                    if certified_employee:
-                        st.success(
-                            f"## ✅ ACCESO PERMITIDO\n"
-                            f"### 👤 {certified_employee['employee_name']}\n"
-                            f"No. {certified_employee['employee_number']}"
-                        )
-                    elif not id_results:
-                        st.warning("## ⚠️ Sin rostros detectados")
-                    else:
-                        st.error("## ❌ ACCESO DENEGADO")
+                # Siempre limpiar antes de reconstruir para evitar mensajes residuales
+                status_placeholder.empty()
+                detail_placeholder.empty()
 
-                with detail_placeholder.container():
-                    for fr in last_face_results:
-                        if fr["certified"]:
-                            st.success(f"✅ {fr['name']} — Certificación válida")
-                        elif fr["matched"]:
-                            st.error(f"❌ {fr['name']} — Sin certificación")
+                if not id_results:
+                    # Sin rostros: solo PI y timestamp
+                    pi_placeholder.caption(f"📡 PI: {pi_msg}")
+                    time_placeholder.caption(f"🕐 Última verificación: {time.strftime('%H:%M:%S')}")
+                else:
+                    with status_placeholder.container():
+                        if certified_employee:
+                            st.success(
+                                f"## ✅ ACCESO PERMITIDO\n"
+                                f"### 👤 {certified_employee['employee_name']}\n"
+                                f"No. {certified_employee['employee_number']}"
+                            )
                         else:
-                            st.warning("⚠️ Rostro no identificado")
+                            st.error("## ❌ ACCESO DENEGADO")
 
-                pi_placeholder.caption(f"📡 PI: {pi_msg}")
-                time_placeholder.caption(f"🕐 Última verificación: {time.strftime('%H:%M:%S')}")
+                    with detail_placeholder.container():
+                        for fr in last_face_results:
+                            if fr["certified"]:
+                                st.success(f"✅ {fr['name']} — Certificación válida")
+                            elif fr["matched"]:
+                                st.error(f"❌ {fr['name']} — Sin certificación")
+
+                    pi_placeholder.caption(f"📡 PI: {pi_msg}")
+                    time_placeholder.caption(f"🕐 Última verificación: {time.strftime('%H:%M:%S')}")
 
             # ~15 FPS para video fluido sin saturar CPU
             time.sleep(0.066)
@@ -1900,6 +1936,7 @@ def main():
             "Gestión de Registros",
             "Calibración",
             "TRAC_MEX",
+            "Configuración TRAC_MEX",
             "DB",
         ],
     )
@@ -1914,6 +1951,8 @@ def main():
         render_calibration_section()
     elif menu == "TRAC_MEX":
         render_tracmex_section()
+    elif menu == "Configuración TRAC_MEX":
+        render_tracmex_config_section()
     elif menu == "DB":
         render_database_section()
 
