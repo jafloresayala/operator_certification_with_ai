@@ -14,7 +14,7 @@ from PIL import Image
 
 from settings import SETTINGS
 from repository import init_db, list_employees_df, get_employee_by_number, get_db_connection as _get_db_conn
-from services import enroll_sample_for_employee, verify_employee_one_to_one
+from services import enroll_sample_for_employee, verify_employee_one_to_one, identify_faces_in_frame
 from biometric_engine import ArcFaceEngine
 from biometric_models import LivenessResult
 
@@ -1674,42 +1674,20 @@ def capture_frame_from_camera(camera_index: int = 0) -> Optional[np.ndarray]:
         cap.release()
 
 def render_operator_section():
-    """Sección para operadores: verificación en tiempo real con video continuo."""
+    """Sección para operadores: identificación 1:N en tiempo real con video continuo."""
     st.header("🏭 Real Time Face Recognition")
 
-    # --- Inicializar estado ---
-    if "operator_employee_number" not in st.session_state:
-        st.session_state.operator_employee_number = ""
+    # --- Inicializar estado (siempre activo) ---
     if "operator_active" not in st.session_state:
-        st.session_state.operator_active = False
-    if "operator_status" not in st.session_state:
-        st.session_state.operator_status = None  # None | "granted" | "denied"
-
-    # --- Paso 1: Pedir número de empleado ---
-    if not st.session_state.operator_active:
-        st.info("Ingresa tu número de empleado para iniciar la verificación continua.")
-        emp_num = st.text_input("Número de Empleado", key="op_emp_input", placeholder="Ej: 50003012")
-        if st.button("▶️ Iniciar Verificación", type="primary", use_container_width=True):
-            if emp_num.strip():
-                st.session_state.operator_employee_number = emp_num.strip()
-                st.session_state.operator_active = True
-                st.session_state.operator_status = None
-                st.rerun()
-            else:
-                st.error("Ingresa un número de empleado válido.")
-        return
-
-    # --- Paso 2: Verificación activa con video en vivo ---
-    employee_number = st.session_state.operator_employee_number
+        st.session_state.operator_active = True
 
     col_header, col_stop = st.columns([3, 1])
     with col_header:
-        st.markdown(f"### Empleado: `{employee_number}`")
+        st.markdown("### 🔍 Reconocimiento automático activo")
     with col_stop:
         if st.button("⏹️ Detener", type="secondary", use_container_width=True):
-            send_to_pi(employee_number, False)
+            send_to_pi("0", False)  # reset PI
             st.session_state.operator_active = False
-            st.session_state.operator_status = None
             st.rerun()
 
     st.divider()
@@ -1721,7 +1699,6 @@ def render_operator_section():
     with col_result:
         status_placeholder = st.empty()
         detail_placeholder = st.empty()
-        tracmex_placeholder = st.empty()
         pi_placeholder = st.empty()
         time_placeholder = st.empty()
 
@@ -1739,11 +1716,9 @@ def render_operator_section():
 
     threshold = float(SETTINGS.DEFAULT_THRESHOLD)
     last_verify_time = 0.0
-    last_pi_time = 0.0
-    access_granted = False
-    face_matched = False
-    tracmex_ok = False
-    tracmex_msg = ""
+
+    # Estado de la última identificación (para anotar frames entre ciclos)
+    last_face_results = []   # lista de dicts con face_box, matched, name, certified, emp_number
     pi_msg = ""
 
     try:
@@ -1755,102 +1730,96 @@ def render_operator_section():
 
             now = time.time()
 
-            # --- Detectar rostros para dibujar rectángulo ---
-            frame_small = cv2.resize(frame_bgr, (0, 0), fx=0.5, fy=0.5)
-            rgb_small = cv2.cvtColor(frame_small, cv2.COLOR_BGR2RGB)
-            face_locations = face_recognition.face_locations(rgb_small, model="hog")
-
-            # Color del rectángulo según último estado de validación
-            if access_granted:
-                rect_color = (0, 255, 0)  # Verde
-                label = "ACCESO PERMITIDO"
-            else:
-                rect_color = (0, 0, 255)  # Rojo
-                label = "ACCESO DENEGADO"
-
+            # --- Anotar frame con los resultados de la última identificación ---
             annotated = frame_bgr.copy()
-            for (top, right, bottom, left) in face_locations:
-                # Escalar de vuelta al tamaño original
-                top *= 2
-                right *= 2
-                bottom *= 2
-                left *= 2
-                cv2.rectangle(annotated, (left, top), (right, bottom), rect_color, 3)
-                # Etiqueta
-                cv2.rectangle(annotated, (left, bottom), (right, bottom + 35), rect_color, -1)
-                cv2.putText(annotated, label, (left + 6, bottom + 25),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+            for fr in last_face_results:
+                fb = fr["face_box"]
+                top, right, bottom, left = fb.top, fb.right, fb.bottom, fb.left
+                if fr["certified"]:
+                    color = (0, 255, 0)  # Verde
+                    label = fr["name"] or "Certificado"
+                elif fr["matched"]:
+                    color = (0, 0, 255)  # Rojo — identificado pero sin certificación
+                    label = f"{fr['name'] or 'Sin cert.'} - NO CERT."
+                else:
+                    color = (0, 0, 255)  # Rojo — desconocido
+                    label = "DESCONOCIDO"
 
-            # Mostrar frame con anotaciones
+                cv2.rectangle(annotated, (left, top), (right, bottom), color, 3)
+                # Fondo de etiqueta
+                cv2.rectangle(annotated, (left, bottom), (right, bottom + 35), color, -1)
+                cv2.putText(annotated, label, (left + 6, bottom + 25),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2)
+
             annotated_rgb = cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB)
             frame_placeholder.image(annotated_rgb, channels="RGB", use_container_width=True)
 
-            # --- Verificación cada 5 segundos ---
+            # --- Identificación + TRAC_MEX cada 5 segundos ---
             if now - last_verify_time >= 5.0:
                 last_verify_time = now
+                last_face_results = []
 
-                liveness_result = fake_liveness_placeholder()
-                try:
-                    result = verify_employee_one_to_one(
-                        engine=engine,
-                        employee_number=employee_number,
-                        frame_bgr=frame_bgr,
-                        threshold=threshold,
-                        liveness_result=liveness_result,
-                    )
-                except NotImplementedError:
-                    result = None
+                # 1:N Identificación
+                id_results = identify_faces_in_frame(engine, frame_bgr, threshold)
 
-                if result:
-                    face_matched = result.matched
+                certified_employee = None  # el primer empleado con certificación válida
 
-                    # TRAC_MEX
-                    tracmex_ok = False
-                    tracmex_msg = ""
-                    if face_matched:
-                        tr = check_tracmex_access(employee_number)
-                        tracmex_ok = tr["passed"]
-                        tracmex_msg = tr.get("message", "")
-                        if tr.get("error"):
-                            tracmex_msg = f"Error: {tr['error']}"
+                for r in id_results:
+                    entry = {
+                        "face_box": r["face_box"],
+                        "matched": r["matched"],
+                        "name": r["employee_name"],
+                        "emp_number": r["employee_number"],
+                        "certified": False,
+                    }
 
-                    access_granted = face_matched and tracmex_ok
+                    if r["matched"] and r["employee_number"]:
+                        # Consultar TRAC_MEX para este empleado
+                        tr = check_tracmex_access(r["employee_number"])
+                        if tr["passed"]:
+                            entry["certified"] = True
+                            if certified_employee is None:
+                                certified_employee = r
 
-                # Actualizar panel de resultados
-                with status_placeholder.container():
-                    if access_granted:
-                        _conn = _get_db_conn()
-                        _emp = get_employee_by_number(_conn, employee_number)
-                        _conn.close()
-                        emp_name = _emp["name"] if _emp else "Desconocido"
-                        st.success(f"## ✅ ACCESO PERMITIDO\n### 👤 {emp_name}")
-                    else:
-                        st.error("## ❌ ACCESO DENEGADO")
+                    last_face_results.append(entry)
 
-                with detail_placeholder.container():
-                    if face_matched:
-                        st.success("✅ Rostro: Coincide")
-                    else:
-                        st.error("❌ Rostro: No coincide")
-                    if not face_matched:
-                        st.warning("⚠️ TRAC_MEX: No consultado")
-                    elif tracmex_ok:
-                        st.success("✅ TRAC_MEX: Certificación válida")
-                    else:
-                        st.error("❌ TRAC_MEX: Certificación no válida")
+                # --- Enviar señal a PI ---
+                if certified_employee:
+                    pi_result = send_to_pi(certified_employee["employee_number"], True)
+                    value_sent = certified_employee["employee_number"]
+                else:
+                    pi_result = send_to_pi("0", False)
+                    value_sent = "0"
 
-                if tracmex_msg:
-                    tracmex_placeholder.info(f"**TRAC_MEX:** {tracmex_msg}")
-
-                # --- POST a PI cada 5 segundos ---
-                pi_result = send_to_pi(employee_number, access_granted)
-                value_sent = employee_number if access_granted else "0"
                 if pi_result.get("ok"):
                     pi_msg = f"✅ Enviado ME14764-AXN.User|{value_sent}"
                 elif pi_result.get("error"):
                     pi_msg = f"❌ Error: {pi_result['error']}"
                 else:
                     pi_msg = f"❌ HTTP {pi_result['status']}"
+
+                # --- Actualizar panel de resultados ---
+                with status_placeholder.container():
+                    if certified_employee:
+                        st.success(
+                            f"## ✅ ACCESO PERMITIDO\n"
+                            f"### 👤 {certified_employee['employee_name']}\n"
+                            f"No. {certified_employee['employee_number']}"
+                        )
+                    elif not id_results:
+                        st.warning("## ⚠️ Sin rostros detectados")
+                    else:
+                        st.error("## ❌ ACCESO DENEGADO")
+
+                with detail_placeholder.container():
+                    for fr in last_face_results:
+                        if fr["certified"]:
+                            st.success(f"✅ {fr['name']} — Certificación válida")
+                        elif fr["matched"]:
+                            st.error(f"❌ {fr['name']} — Sin certificación")
+                        else:
+                            st.warning("⚠️ Rostro no identificado")
+
                 pi_placeholder.caption(f"📡 PI: {pi_msg}")
                 time_placeholder.caption(f"🕐 Última verificación: {time.strftime('%H:%M:%S')}")
 
@@ -1859,8 +1828,8 @@ def render_operator_section():
 
     finally:
         cap.release()
-        # Siempre enviar 0 a PI al terminar (por detención, error o cierre)
-        send_to_pi(employee_number, False)
+        # Siempre enviar 0 a PI al terminar
+        send_to_pi("0", False)
 
 
 def main():
@@ -1876,7 +1845,9 @@ def main():
     from repository import verify_admin_credentials
 
     if "app_role" not in st.session_state:
-        st.session_state.app_role = None  # None | "admin" | "operator"
+        st.session_state.app_role = "operator"  # Por defecto: operador
+    if "operator_active" not in st.session_state:
+        st.session_state.operator_active = True   # Webcam auto-encendida
 
     if st.session_state.app_role is None:
         st.sidebar.header("Acceso")
@@ -1911,7 +1882,6 @@ def main():
         if st.sidebar.button("🚪 Cerrar Sesión", use_container_width=True):
             st.session_state.app_role = None
             st.session_state.operator_active = False
-            st.session_state.operator_status = None
             st.rerun()
         render_operator_section()
         return

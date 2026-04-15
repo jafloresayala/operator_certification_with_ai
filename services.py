@@ -12,6 +12,7 @@ from repository import (
     add_identity_sample,
     get_employee_by_number,
     get_employee_samples,
+    get_all_enrolled_identities,
     log_verification,
 )
 from biometric_engine import BiometricEngine
@@ -187,5 +188,78 @@ def verify_employee_one_to_one(
             source="streamlit_ui_1to1",
         )
         return best_result
+    finally:
+        conn.close()
+
+
+def identify_faces_in_frame(
+    engine: BiometricEngine,
+    frame_bgr: np.ndarray,
+    threshold: float,
+) -> list:
+    """
+    Identificación 1:N — extrae TODOS los rostros del frame y los compara
+    contra TODOS los empleados enrolados.
+
+    Retorna lista de dicts, uno por cada rostro detectado:
+        {
+            "face_box": FaceBox,
+            "matched": bool,
+            "employee_number": str | None,
+            "employee_name": str | None,
+            "employee_id": int | None,
+            "distance": float | None,
+        }
+    """
+    all_extracted = engine.extract_all(frame_bgr)
+    if not all_extracted:
+        return []
+
+    conn = get_db_connection()
+    try:
+        enrolled = get_all_enrolled_identities(conn)
+        if not enrolled:
+            # Nadie enrolado — devolver rostros sin identificar
+            return [
+                {
+                    "face_box": ext.face_box,
+                    "matched": False,
+                    "employee_number": None,
+                    "employee_name": None,
+                    "employee_id": None,
+                    "distance": None,
+                }
+                for ext in all_extracted
+            ]
+
+        results = []
+        for ext in all_extracted:
+            probe = ext.embedding
+            probe_norm = probe / np.linalg.norm(probe)
+
+            best_distance = float("inf")
+            best_emp = None
+
+            for emp in enrolled:
+                for enrolled_emb in emp["embeddings"]:
+                    enrolled_norm = enrolled_emb / np.linalg.norm(enrolled_emb)
+                    similarity = float(np.dot(probe_norm, enrolled_norm))
+                    distance = 1.0 - similarity
+                    if distance < best_distance:
+                        best_distance = distance
+                        best_emp = emp
+
+            matched = best_distance <= threshold and best_emp is not None
+
+            results.append({
+                "face_box": ext.face_box,
+                "matched": matched,
+                "employee_number": best_emp["employee_number"] if matched else None,
+                "employee_name": best_emp["name"] if matched else None,
+                "employee_id": best_emp["employee_id"] if matched else None,
+                "distance": best_distance,
+            })
+
+        return results
     finally:
         conn.close()

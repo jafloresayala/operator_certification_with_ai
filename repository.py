@@ -333,6 +333,46 @@ def get_employee_samples(conn, employee_id: int, identity_id: Optional[int] = No
             continue
     return embeddings
 
+
+def get_all_enrolled_identities(conn) -> List[Dict[str, Any]]:
+    """
+    Retorna una lista con todos los empleados enrolados y sus embeddings agrupados.
+    Cada elemento: {employee_id, employee_number, name, identity_id, embeddings: [np.array]}
+    """
+    c = conn.cursor()
+    c.execute(
+        """
+        SELECT e.id AS employee_id, e.employee_number, e.name, e.face_identity_id,
+               s.embedding_json
+        FROM employees e
+        JOIN identity_samples s ON s.employee_id = e.id AND s.identity_id = e.face_identity_id
+        WHERE e.face_identity_id IS NOT NULL
+        ORDER BY e.id
+        """
+    )
+    rows = c.fetchall()
+
+    grouped: Dict[int, Dict[str, Any]] = {}
+    for row in rows:
+        eid = row["employee_id"]
+        if eid not in grouped:
+            grouped[eid] = {
+                "employee_id": eid,
+                "employee_number": row["employee_number"],
+                "name": row["name"],
+                "identity_id": row["face_identity_id"],
+                "embeddings": [],
+            }
+        try:
+            grouped[eid]["embeddings"].append(
+                np.array(json.loads(row["embedding_json"]), dtype=np.float32)
+            )
+        except Exception:
+            continue
+
+    return list(grouped.values())
+
+
 def list_employees_df() -> pd.DataFrame:
     conn = get_db_connection()
     query = """
