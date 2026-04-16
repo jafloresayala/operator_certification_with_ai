@@ -39,6 +39,9 @@ class Settings:
     TRACMEX_API_URL: str = "http://nts5512/TracMexApi/api/StationInitialization/Get_User_Access_Status"
     TRACMEX_DEFAULT_PROCESS_ID: int = 50048
 
+    # TRESS API (datos de empleados)
+    TRESS_API_URL: str = "http://nts5102/TressWebAPI/api/EmployeeInfo/GetEmployeeInfo"
+
 
 SETTINGS = Settings()
 

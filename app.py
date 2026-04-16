@@ -21,68 +21,24 @@ from biometric_models import LivenessResult
 st.set_page_config(page_title="Sistema Biométrico Facial", layout="wide")
 
 
-def get_departments(conn) -> List[str]:
-    """Carga dinámicamente los departamentos desde la BD."""
-    from repository import get_all_departments
-    deps = get_all_departments(conn)
-    return [d["name"] for d in deps]
-
-def get_roles_for_department(conn, department_id: int) -> List[str]:
-    """Obtiene los roles para un departamento específico."""
-    from repository import get_roles_by_department
-    roles = get_roles_by_department(conn, department_id)
-    return [r["name"] for r in roles]
-
-def get_locations(conn) -> List[str]:
-    """Carga dinámicamente las ubicaciones desde la BD."""
-    from repository import get_all_locations
-    locs = get_all_locations(conn)
-    return [l["name"] for l in locs]
-
-def get_department_id_by_name(conn, name: str) -> Optional[int]:
-    """Obtiene el ID de un departamento por nombre."""
-    c = conn.cursor()
-    c.execute("SELECT id FROM departments WHERE name = ?", (name,))
-    row = c.fetchone()
-    return row[0] if row else None
-
-def get_role_id_by_name(conn, role_name: str, department_id: int) -> Optional[int]:
-    """Obtiene el ID de un rol por nombre y departamento."""
-    c = conn.cursor()
-    c.execute("SELECT id FROM roles WHERE name = ? AND department_id = ?", (role_name, department_id))
-    row = c.fetchone()
-    return row[0] if row else None
-
-def get_location_id_by_name(conn, name: str) -> Optional[int]:
-    """Obtiene el ID de una ubicación por nombre."""
-    c = conn.cursor()
-    c.execute("SELECT id FROM locations WHERE name = ?", (name,))
-    row = c.fetchone()
-    return row[0] if row else None
-
-def prepare_employee_data_for_db(conn, form_data: Dict[str, Any]) -> Dict[str, Any]:
-    """Convierte nombres a IDs y prepara el diccionario para la BD."""
-    data = form_data.copy()
-    
-    # Convertir department nombre -> department_id
-    if "department" in data:
-        dept_id = get_department_id_by_name(conn, data["department"])
-        del data["department"]
-        data["department_id"] = dept_id
-    
-    # Convertir role nombre -> role_id
-    if "role" in data and data.get("department_id"):
-        role_id = get_role_id_by_name(conn, data["role"], data["department_id"])
-        del data["role"]
-        data["role_id"] = role_id
-    
-    # Convertir location nombre -> location_id
-    if "location" in data and data["location"]:
-        loc_id = get_location_id_by_name(conn, data["location"])
-        del data["location"]
-        data["location_id"] = loc_id
-    
-    return data
+def fetch_tress_employee(employee_number: str) -> Optional[Dict[str, Any]]:
+    """Consulta la API de TRESS para obtener datos del empleado."""
+    import requests
+    try:
+        resp = requests.get(
+            SETTINGS.TRESS_API_URL,
+            params={"EmployeeNumber": employee_number},
+            headers={"Accept": "application/json"},
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            if data and data.get("EmployeeNumber"):
+                return data
+        return None
+    except Exception as e:
+        print(f"Error consultando TRESS API: {e}")
+        return None
 
 # Funciones de validación
 def validate_employee_number(value: str) -> tuple[bool, str]:
@@ -119,9 +75,6 @@ def validate_phone(value: str) -> tuple[bool, str]:
         return False, "Solo números y caracteres permitidos"
     return True, ""
 
-
-DEPARTMENT_OPTIONS = ["TI", "Ventas", "RRHH", "Finanzas", "Logistica", "Calidad", "Manufactura"]
-ROLE_OPTIONS = ["Gerente", "Supervisor", "Desarrollador", "Cientifico de Datos", "Analista de Datos", "Interno"]
 
 @st.cache_resource
 def get_biometric_engine():
@@ -193,31 +146,6 @@ def get_frame_from_webrtc_ctx(ctx):
     if processor is None or not hasattr(processor, "get_latest_frame"):
         return None
     return processor.get_latest_frame()
-
-def build_employee_form(prefix="reg"):
-    employee_number = st.text_input("Numero de empleado", key=f"{prefix}_employee_number")
-    name = st.text_input("Nombre completo", key=f"{prefix}_name")
-    department = st.selectbox("Departamento", DEPARTMENT_OPTIONS, key=f"{prefix}_department")
-    role = st.selectbox("Rol", ROLE_OPTIONS, key=f"{prefix}_role")
-    email = st.text_input("Correo", key=f"{prefix}_email")
-    phone = st.text_input("Telefono", key=f"{prefix}_phone")
-    location = st.text_input("Ubicacion", key=f"{prefix}_location")
-    shift = st.selectbox("Turno", ["Matutino", "Vespertino", "Nocturno"], key=f"{prefix}_shift")
-    status = st.selectbox("Estatus", ["Activo", "Inactivo", "Baja"], key=f"{prefix}_status")
-    notes = st.text_area("Notas", key=f"{prefix}_notes")
-
-    return {
-        "employee_number": employee_number.strip(),
-        "name": name.strip(),
-        "department": department,
-        "role": role,
-        "email": email.strip(),
-        "phone": phone.strip(),
-        "location": location.strip(),
-        "shift": shift,
-        "status": status,
-        "notes": notes.strip(),
-    }
 
 def fake_liveness_placeholder():
     """
@@ -375,250 +303,198 @@ def draw_detected_face_box(image_bgr, face_location, total_faces=1):
 
 def render_employee_form_step_by_step():
     """
-    Formulario interactivo de datos del candidato dividido en 5 pasos.
-    Cada paso muestra solo los campos relevantes con animación de progreso.
+    Formulario simplificado: ingresa número de empleado → consulta TRESS API → confirma datos → enrolamiento.
     """
-    from repository import get_db_connection
-    conn = get_db_connection()
-    
-    # Cargar opciones dinámicamente desde BD
-    departments = get_departments(conn)
-    locations = get_locations(conn)
-    
+
     # Inicializar estado del formulario
     if "form_wizard_step" not in st.session_state:
         st.session_state.form_wizard_step = 0
         st.session_state.form_wizard_data = {
             "employee_number": "",
             "name": "",
-            "department": departments[0] if departments else "TI",
-            "role": "",
+            "first_name": "",
+            "last_name": "",
+            "middle_name": "",
+            "user_id": "",
             "email": "",
-            "phone": "",
-            "location": locations[0] if locations else "",
-            "shift": "Matutino",
+            "level": "",
+            "role_code": "",
+            "role_description": "",
+            "cost_center_code": "",
+            "cost_center_description": "",
+            "shift_code": "",
+            "shift_description": "",
+            "supervisor_role": "",
             "status": "Activo",
             "uses_glasses": False,
             "notes": "",
         }
         st.session_state.form_wizard_errors = {}
+        st.session_state.tress_fetched = False
     
     form_data = st.session_state.form_wizard_data
     errors = st.session_state.form_wizard_errors
     current_step = st.session_state.form_wizard_step
     
-    # Emojis y descripciones para cada paso
     steps = [
-        {"title": "📋 Información Básica", "emoji": "👤"},
-        {"title": "🏢 Organización", "emoji": "🏢"},
-        {"title": "📞 Contacto", "emoji": "📧"},
-        {"title": "⏰ Detalles de Trabajo", "emoji": "⏰"},
+        {"title": "🔢 Número de Empleado", "emoji": "🔢"},
+        {"title": "📋 Datos del Empleado (TRESS)", "emoji": "📋"},
         {"title": "👓 Confirmación", "emoji": "✅"},
     ]
     
-    # Mostrar barra de progreso visual
+    # Barra de progreso
     col1, col2, col3 = st.columns([1, 2, 1])
     with col2:
         progress_text = f"Paso {current_step + 1} de {len(steps)}"
         st.progress((current_step + 1) / len(steps), text=progress_text)
     
-    # Mostrar indicadores de pasos (estilo breadcrumb)
     step_indicators = " → ".join(
-        [f"{s['emoji']}" if i == current_step else f"{s['emoji']}" for i, s in enumerate(steps)]
+        [f"{'**' if i == current_step else ''}{s['emoji']}{' ←' if i == current_step else ''}" for i, s in enumerate(steps)]
     )
     st.markdown(f"<div style='text-align: center; font-size: 20px;'>{step_indicators}</div>", unsafe_allow_html=True)
     
-    # Título del paso actual
     st.subheader(steps[current_step]["title"])
     st.markdown("---")
     
     # ==========================================
-    # PASO 0: Información Básica
+    # PASO 0: Número de Empleado
     # ==========================================
     if current_step == 0:
-        st.markdown("Ingresa los datos básicos del usuario.")
-        col1, col2 = st.columns(2)
+        st.markdown("Ingresa el número de empleado. Los datos se cargarán automáticamente desde TRESS.")
         
-        with col1:
-            form_data["employee_number"] = st.text_input(
-                "🔢 Número de empleado",
-                value=form_data["employee_number"],
-                key="step0_employee_number"
-            ).strip()
-            valid, msg = validate_employee_number(form_data["employee_number"])
-            if not valid and form_data["employee_number"]:
-                st.error(f"❌ Número de empleado: {msg}")
-                errors["employee_number"] = msg
-            else:
-                errors.pop("employee_number", None)
+        form_data["employee_number"] = st.text_input(
+            "🔢 Número de empleado",
+            value=form_data["employee_number"],
+            key="step0_employee_number"
+        ).strip()
         
-        with col2:
-            form_data["name"] = st.text_input(
-                "👤 Nombre completo",
-                value=form_data["name"],
-                key="step0_name"
-            ).strip()
-            valid, msg = validate_name(form_data["name"])
-            if not valid and form_data["name"]:
-                st.error(f"❌ Nombre: {msg}")
-                errors["name"] = msg
-            else:
-                errors.pop("name", None)
+        valid, msg = validate_employee_number(form_data["employee_number"])
+        if not valid and form_data["employee_number"]:
+            st.error(f"❌ {msg}")
+            errors["employee_number"] = msg
+        else:
+            errors.pop("employee_number", None)
         
-        # Validación del paso
-        step_0_valid = len(errors) == 0 and form_data["employee_number"] and form_data["name"]
-        if not step_0_valid:
-            st.warning("⚠️ Los campos son requeridos y deben cumplir los formatos")
+        # Verificar si ya existe en la base de datos
+        if form_data["employee_number"] and "employee_number" not in errors:
+            conn = _get_db_conn()
+            try:
+                existing = get_employee_by_number(conn, form_data["employee_number"])
+            finally:
+                conn.close()
+            if existing:
+                st.error(f"❌ El empleado #{form_data['employee_number']} ya está registrado en el sistema ({existing['name']}).")
+                errors["employee_number"] = "Ya existe"
+        
+        step_valid = len(errors) == 0 and bool(form_data["employee_number"])
+        
+        if not step_valid and "employee_number" not in errors:
+            st.warning("⚠️ Ingresa un número de empleado válido")
     
     # ==========================================
-    # PASO 1: Organización
+    # PASO 1: Datos de TRESS (auto-llenado + editable)
     # ==========================================
     elif current_step == 1:
-        st.markdown("Información de la organización del candidato.")
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            idx = departments.index(form_data["department"]) if form_data["department"] in departments else 0
-            form_data["department"] = st.selectbox(
-                "🏢 Departamento",
-                departments,
-                index=idx,
-                key="step1_department"
-            )
-            # Cargar roles para el departamento seleccionado
-            dept_id = get_department_id_by_name(conn, form_data["department"])
-            if dept_id:
-                available_roles = get_roles_for_department(conn, dept_id)
+        # Consultar TRESS si aún no se ha hecho
+        if not st.session_state.tress_fetched:
+            with st.spinner("🔄 Consultando datos en TRESS..."):
+                tress_data = fetch_tress_employee(form_data["employee_number"])
+            
+            if tress_data:
+                form_data["name"] = tress_data.get("PrettyName", "")
+                form_data["first_name"] = tress_data.get("FirstName", "")
+                form_data["last_name"] = tress_data.get("LastName", "")
+                form_data["middle_name"] = tress_data.get("MiddleName", "")
+                form_data["user_id"] = tress_data.get("UserID", "")
+                form_data["email"] = tress_data.get("Email", "")
+                form_data["level"] = tress_data.get("Level", "")
+                form_data["role_code"] = tress_data.get("RoleCode", "")
+                form_data["role_description"] = tress_data.get("RoleDescription", "")
+                form_data["cost_center_code"] = tress_data.get("CostCenterCode", "")
+                form_data["cost_center_description"] = tress_data.get("CostCenterDescription", "")
+                form_data["shift_code"] = tress_data.get("ShiftCode", "")
+                form_data["shift_description"] = tress_data.get("ShiftDescription", "")
+                form_data["supervisor_role"] = tress_data.get("SupervisorRole", "")
+                st.session_state.tress_fetched = True
+                st.success("✅ Datos cargados desde TRESS")
             else:
-                available_roles = []
+                st.error("❌ El número de empleado no existe en TRESS. Verifica el número e intenta de nuevo.")
+                st.session_state.tress_fetched = False
+                st.session_state.form_wizard_step = 0
+                import time; time.sleep(2)
+                st.rerun()
+                return
+        
+        st.markdown("Verifica y ajusta los datos del empleado.")
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            form_data["name"] = st.text_input("👤 Nombre completo", value=form_data["name"], key="step1_name")
+            form_data["first_name"] = st.text_input("Nombre(s)", value=form_data["first_name"], key="step1_first_name")
+            form_data["last_name"] = st.text_input("Apellido paterno", value=form_data["last_name"], key="step1_last_name")
+            form_data["middle_name"] = st.text_input("Apellido materno", value=form_data["middle_name"], key="step1_middle_name")
+            form_data["user_id"] = st.text_input("🆔 User ID", value=form_data["user_id"], key="step1_user_id")
+            form_data["email"] = st.text_input("📧 Correo", value=form_data["email"], key="step1_email")
+            form_data["level"] = st.text_input("📊 Nivel", value=form_data["level"], key="step1_level")
         
         with col2:
-            if available_roles:
-                idx = available_roles.index(form_data["role"]) if form_data["role"] in available_roles else 0
-                form_data["role"] = st.selectbox(
-                    "👔 Rol",
-                    available_roles,
-                    index=idx,
-                    key="step1_role"
-                )
-            else:
-                st.warning("No hay roles disponibles para este departamento")
-                form_data["role"] = ""
+            form_data["role_code"] = st.text_input("Código de rol", value=form_data["role_code"], key="step1_role_code")
+            form_data["role_description"] = st.text_input("👔 Rol", value=form_data["role_description"], key="step1_role_desc")
+            form_data["cost_center_code"] = st.text_input("Código centro costos", value=form_data["cost_center_code"], key="step1_cc_code")
+            form_data["cost_center_description"] = st.text_input("🏢 Centro de costos", value=form_data["cost_center_description"], key="step1_cc_desc")
+            form_data["shift_code"] = st.text_input("Código de turno", value=form_data["shift_code"], key="step1_shift_code")
+            form_data["shift_description"] = st.text_input("⏰ Turno", value=form_data["shift_description"], key="step1_shift_desc")
+            form_data["supervisor_role"] = st.text_input("👑 Rol de supervisor (S/N)", value=form_data["supervisor_role"], key="step1_supervisor")
         
-        idx = locations.index(form_data["location"]) if form_data["location"] in locations else 0
-        form_data["location"] = st.selectbox(
-            "📍 Ubicación",
-            locations,
-            index=idx,
-            key="step1_location"
-        )
-        
-        step_0_valid = form_data["department"] and form_data["role"] and form_data["location"]
+        step_valid = bool(form_data["name"])
+        if not step_valid:
+            st.warning("⚠️ El nombre es obligatorio")
     
     # ==========================================
-    # PASO 2: Contacto
+    # PASO 2: Confirmación
     # ==========================================
     elif current_step == 2:
-        st.markdown("Información de contacto del candidato.")
-        col1, col2 = st.columns(2)
+        st.markdown("Confirma la información y opciones adicionales.")
         
-        with col1:
-            form_data["email"] = st.text_input(
-                "📧 Correo electrónico",
-                value=form_data["email"],
-                key="step2_email"
-            ).strip()
-            valid, msg = validate_email(form_data["email"])
-            if not valid and form_data["email"]:
-                st.error(f"❌ Correo: {msg}")
-                errors["email"] = msg
-            else:
-                errors.pop("email", None)
-        
-        with col2:
-            form_data["phone"] = st.text_input(
-                "☎️ Teléfono",
-                value=form_data["phone"],
-                key="step2_phone"
-            ).strip()
-            valid, msg = validate_phone(form_data["phone"])
-            if not valid and form_data["phone"]:
-                st.error(f"❌ Teléfono: {msg}")
-                errors["phone"] = msg
-            else:
-                errors.pop("phone", None)
-        
-        step_0_valid = len(errors) == 0
-    
-    # ==========================================
-    # PASO 3: Detalles de Trabajo
-    # ==========================================
-    elif current_step == 3:
-        st.markdown("Detalles del contrato y disponibilidad.")
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            form_data["shift"] = st.selectbox(
-                "⏰ Turno",
-                ["Matutino", "Vespertino", "Nocturno"],
-                index=["Matutino", "Vespertino", "Nocturno"].index(form_data["shift"]),
-                key="step3_shift"
-            )
-        
-        with col2:
-            form_data["status"] = st.selectbox(
-                "📊 Estatus",
-                ["Activo", "Inactivo", "Baja"],
-                index=["Activo", "Inactivo", "Baja"].index(form_data["status"]),
-                key="step3_status"
-            )
-        
-        step_0_valid = True
-    
-    # ==========================================
-    # PASO 4: Confirmación y Finalización
-    # ==========================================
-    elif current_step == 4:
-        st.markdown("Completa los últimos detalles y confirma la información.")
-        
-        # Checkbox de lentes
         form_data["uses_glasses"] = st.checkbox(
             "👓 El candidato usa lentes normalmente",
             value=form_data["uses_glasses"],
-            key="step4_glasses"
+            key="step2_glasses"
         )
         
-        # Notas adicionales
+        form_data["status"] = st.selectbox(
+            "📊 Estatus",
+            ["Activo", "Inactivo", "Baja"],
+            index=["Activo", "Inactivo", "Baja"].index(form_data["status"]),
+            key="step2_status"
+        )
+        
         form_data["notes"] = st.text_area(
             "📝 Notas adicionales (opcional)",
             value=form_data["notes"],
             height=100,
-            key="step4_notes"
+            key="step2_notes"
         ).strip()
         
-        # Mostrar resumen
         st.markdown("---")
-        st.markdown("### 📋 Resumen de Datos Ingresados")
+        st.markdown("### 📋 Resumen de Datos")
         
         summary_cols = st.columns(2)
         with summary_cols[0]:
-            st.write(f"**Empleado:** {form_data['employee_number']} - {form_data['name']}")
-            st.write(f"**Departamento:** {form_data['department']}")
-            st.write(f"**Rol:** {form_data['role']}")
-            st.write(f"**Correo:** {form_data['email']}")
+            st.write(f"**No. Empleado:** {form_data['employee_number']}")
+            st.write(f"**Nombre:** {form_data['name']}")
+            st.write(f"**User ID:** {form_data['user_id']}")
+            st.write(f"**Email:** {form_data['email']}")
+            st.write(f"**Nivel:** {form_data['level']}")
         
         with summary_cols[1]:
-            st.write(f"**Teléfono:** {form_data['phone']}")
-            st.write(f"**Ubicación:** {form_data['location']}")
-            st.write(f"**Turno:** {form_data['shift']}")
-            st.write(f"**Estatus:** {form_data['status']}")
+            st.write(f"**Rol:** {form_data['role_description']}")
+            st.write(f"**Centro de Costos:** {form_data['cost_center_description']}")
+            st.write(f"**Turno:** {form_data['shift_description']}")
+            st.write(f"**Supervisor:** {form_data['supervisor_role']}")
+            st.write(f"**Usa lentes:** {'Sí' if form_data['uses_glasses'] else 'No'}")
         
-        st.write(f"**Usa lentes:** {'Sí' if form_data['uses_glasses'] else 'No'}")
-        
-        if form_data["notes"]:
-            st.write(f"**Notas:** {form_data['notes']}")
-        
-        step_0_valid = True
+        step_valid = True
     
     # ==========================================
     # Botones de Navegación
@@ -626,37 +502,29 @@ def render_employee_form_step_by_step():
     st.markdown("---")
     nav_cols = st.columns([1, 1, 1, 1, 1])
     
-    # Botón Atrás
     with nav_cols[0]:
-        if st.button("⬅️ Atrás", use_container_width=True, disabled=(current_step == 0)):
+        if st.button("⬅️ Atrás", width='stretch', disabled=(current_step == 0)):
+            if current_step == 1:
+                st.session_state.tress_fetched = False
             st.session_state.form_wizard_step = current_step - 1
             st.rerun()
     
-    # Botón Siguiente (o Iniciar Enrolamiento en el último paso)
     with nav_cols[4]:
         if current_step < len(steps) - 1:
-            if st.button("➡️ Siguiente", use_container_width=True, disabled=(not step_0_valid)):
+            if st.button("➡️ Siguiente", width='stretch', disabled=(not step_valid)):
                 st.session_state.form_wizard_step = current_step + 1
                 st.rerun()
         else:
-            # Último paso: botón para iniciar enrolamiento
-            if st.button("✅ Iniciar Enrolamiento Guiado", use_container_width=True, type="primary", disabled=(not step_0_valid)):
-                # Validaciones finales
+            if st.button("✅ Iniciar Enrolamiento Guiado", width='stretch', type="primary", disabled=(not step_valid)):
                 if not form_data["employee_number"] or not form_data["name"]:
                     st.error("❌ Número de empleado y nombre son obligatorios.")
                     return
                 
-                # Separar uses_glasses del resto de datos
                 uses_glasses = form_data.pop("uses_glasses")
-                form_data_temp = form_data.copy()
+                employee_data_clean = {k: v for k, v in form_data.items() if k != "uses_glasses"}
                 
-                # Convertir nombres a IDs para la BD
-                employee_data_clean = prepare_employee_data_for_db(conn, form_data_temp)
-                
-                # Obtener plan de captura
                 plan = get_guided_enrollment_plan(uses_glasses)
                 
-                # Guardar estado del enrolamiento
                 st.session_state.guided_enrollment = {
                     "started": True,
                     "employee_data": employee_data_clean,
@@ -666,13 +534,12 @@ def render_employee_form_step_by_step():
                     "completed_samples": [],
                 }
                 
-                # Limpiar estado del formulario wizard para próximos usos
                 del st.session_state.form_wizard_step
                 del st.session_state.form_wizard_data
+                if "tress_fetched" in st.session_state:
+                    del st.session_state.tress_fetched
                 
                 st.rerun()
-    
-    conn.close()  # Cerrar la conexión al final
 
 def render_register_section():
     st.header("Registro Guiado de Identidad")
@@ -708,7 +575,7 @@ def render_register_section():
         if state["completed_samples"]:
             st.subheader("Resumen de muestras guardadas")
             summary_df = pd.DataFrame(state["completed_samples"])
-            st.dataframe(summary_df, use_container_width=True, hide_index=True)
+            st.dataframe(summary_df, width='stretch', hide_index=True)
 
         col1, col2 = st.columns(2)
         with col1:
@@ -745,7 +612,7 @@ def render_register_section():
             st.image(
                 cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB),
                 caption="Imagen capturada (sin rostro detectado)",
-                use_container_width=True,
+                width='stretch',
             )
             return
 
@@ -764,7 +631,7 @@ def render_register_section():
         st.image(
             cv2.cvtColor(preview_with_frame, cv2.COLOR_BGR2RGB),
             caption="Validación de Calidad",
-            use_container_width=True,
+            width='stretch',
         )
         
         # Mostrar estado de calidad
@@ -778,7 +645,7 @@ def render_register_section():
         st.image(
             cv2.cvtColor(face_crop, cv2.COLOR_BGR2RGB),
             caption="Recorte del rostro que se usará para el enrolamiento",
-            use_container_width=True,
+            width='stretch',
         )
 
         col1, col2 = st.columns(2)
@@ -823,7 +690,7 @@ def render_register_section():
                 st.rerun()
         
         with col1:
-            if st.button("⬅️ Volver al Formulario", use_container_width=True):
+            if st.button("⬅️ Volver al Formulario", width='stretch'):
                 reset_guided_enrollment_state()
                 if "form_wizard_step" in st.session_state:
                     del st.session_state.form_wizard_step
@@ -951,7 +818,7 @@ def render_verify_section():
         # Mostrar preview
         col1, col2 = st.columns(2)
         with col1:
-            st.image(image, caption="Foto capturada", use_container_width=True)
+            st.image(image, caption="Foto capturada", width='stretch')
         
         with col2:
             st.subheader("Parámetros de Verificación")
@@ -961,7 +828,7 @@ def render_verify_section():
         st.divider()
         
         # Botón para verificar
-        if st.button("🔍 Verificar Identidad", type="primary", use_container_width=True):
+        if st.button("🔍 Verificar Identidad", type="primary", width='stretch'):
             if not employee_number.strip():
                 st.error("❌ Por favor: Ingresa el número de empleado")
                 return
@@ -1000,18 +867,18 @@ def render_verify_section():
             tracmex_ok = tracmex_result["passed"] if tracmex_result else False
             access_granted = face_ok and tracmex_ok
 
+            # Obtener nombre del empleado
+            _conn = _get_db_conn()
+            _emp = get_employee_by_number(_conn, employee_number.strip())
+            _conn.close()
+            emp_name = _emp["name"] if _emp else "Desconocido"
+
             # Enviar resultado a PI
             with st.spinner("📡 Enviando resultado a PI..."):
-                pi_result = send_to_pi(employee_number.strip(), access_granted)
+                pi_result = send_to_pi(employee_number.strip(), access_granted, emp_name)
 
             # Resultado principal - GRANDE Y CLARO
             if access_granted:
-                # Obtener nombre del empleado
-                _conn = _get_db_conn()
-                _emp = get_employee_by_number(_conn, employee_number.strip())
-                _conn.close()
-                emp_name = _emp["name"] if _emp else "Desconocido"
-
                 st.success("✅ VERIFICACIÓN EXITOSA")
                 st.markdown(f"""
                 <div style="text-align: center; font-size: 24px; margin: 20px 0;">
@@ -1173,7 +1040,7 @@ def render_management_section():
     if df.empty:
         st.info("No hay empleados registrados.")
         return
-    st.dataframe(df, use_container_width=True, hide_index=True)
+    st.dataframe(df, width='stretch', hide_index=True)
 
 def render_calibration_section():
     st.header("Calibración de threshold")
@@ -1218,7 +1085,7 @@ def render_database_section():
             
             col_login, col_cancel = st.columns(2)
             with col_login:
-                if st.button("Ingresar", type="primary", use_container_width=True):
+                if st.button("Ingresar", type="primary", width='stretch'):
                     if verify_admin_credentials(username, password):
                         st.session_state.db_authenticated = True
                         st.success("✅ Autenticación exitosa")
@@ -1227,7 +1094,7 @@ def render_database_section():
                         st.error("❌ Usuario o contraseña incorrectos")
             
             with col_cancel:
-                if st.button("Cancelar", use_container_width=True):
+                if st.button("Cancelar", width='stretch'):
                     pass
         
         with col2:
@@ -1243,7 +1110,7 @@ def render_database_section():
     
     col1, col2 = st.columns([4, 1])
     with col2:
-        if st.button("🚪 Cerrar Sesión", use_container_width=True):
+        if st.button("🚪 Cerrar Sesión", width='stretch'):
             st.session_state.db_authenticated = False
             st.rerun()
     
@@ -1252,7 +1119,7 @@ def render_database_section():
     # Selector de operación
     operation = st.radio(
         "Selecciona una operación:",
-        ["Ver Empleados", "Editar Empleado", "Eliminar Empleado", "⚙️ Configuración"],
+        ["Ver Empleados", "Editar Empleado", "Eliminar Empleado"],
         horizontal=True
     )
     
@@ -1271,7 +1138,7 @@ def render_database_section():
                 st.info("No hay empleados registrados.")
             else:
                 # Mostrar tabla
-                st.dataframe(employees_df, use_container_width=True, hide_index=True)
+                st.dataframe(employees_df, width='stretch', hide_index=True)
                 
                 # Opciones de exportación
                 col1, col2 = st.columns(2)
@@ -1291,6 +1158,7 @@ def render_database_section():
             st.error(f"Error al obtener empleados: {str(e)}")
     
     # ============================
+    # ============================
     # EDITAR EMPLEADO
     # ============================
     elif operation == "Editar Empleado":
@@ -1302,7 +1170,6 @@ def render_database_section():
             if employees_df.empty:
                 st.info("No hay empleados registrados para editar.")
             else:
-                # Selector de empleado
                 employee_options = [f"{row['employee_number']} - {row['name']}" for _, row in employees_df.iterrows()]
                 selected_option = st.selectbox("Selecciona un empleado", employee_options)
                 
@@ -1313,39 +1180,80 @@ def render_database_section():
                 st.write(f"**ID:** {selected_employee['id']}")
                 st.write(f"**Número de Empleado:** {selected_employee['employee_number']}")
                 st.write(f"**Fecha de Registro:** {selected_employee['registration_date']}")
+                
+                # Botón para recargar datos desde TRESS
+                if st.button("🔄 Recargar datos desde TRESS"):
+                    with st.spinner("Consultando TRESS..."):
+                        tress_data = fetch_tress_employee(str(selected_employee['employee_number']))
+                    if tress_data:
+                        updated = {
+                            "name": tress_data.get("PrettyName", ""),
+                            "first_name": tress_data.get("FirstName", ""),
+                            "last_name": tress_data.get("LastName", ""),
+                            "middle_name": tress_data.get("MiddleName", ""),
+                            "user_id": tress_data.get("UserID", ""),
+                            "email": tress_data.get("Email", ""),
+                            "level": tress_data.get("Level", ""),
+                            "role_code": tress_data.get("RoleCode", ""),
+                            "role_description": tress_data.get("RoleDescription", ""),
+                            "cost_center_code": tress_data.get("CostCenterCode", ""),
+                            "cost_center_description": tress_data.get("CostCenterDescription", ""),
+                            "shift_code": tress_data.get("ShiftCode", ""),
+                            "shift_description": tress_data.get("ShiftDescription", ""),
+                            "supervisor_role": tress_data.get("SupervisorRole", ""),
+                        }
+                        if update_employee(conn, selected_employee['id'], updated):
+                            st.success("✅ Datos actualizados desde TRESS")
+                            st.rerun()
+                    else:
+                        st.error("No se encontró información en TRESS")
+                
                 st.markdown("---")
                 
-                # Formulario de edición
                 col1, col2 = st.columns(2)
-                
                 with col1:
-                    name = st.text_input("Nombre completo", value=selected_employee.get('name', ''))
-                    department = st.text_input("Departamento", value=selected_employee.get('department', ''))
-                    role = st.text_input("Rol", value=selected_employee.get('role', ''))
-                    email = st.text_input("Correo", value=selected_employee.get('email', ''))
+                    name = st.text_input("👤 Nombre completo", value=selected_employee.get('name', '') or '')
+                    first_name = st.text_input("Nombre(s)", value=selected_employee.get('first_name', '') or '')
+                    last_name = st.text_input("Apellido paterno", value=selected_employee.get('last_name', '') or '')
+                    middle_name = st.text_input("Apellido materno", value=selected_employee.get('middle_name', '') or '')
+                    user_id = st.text_input("🆔 User ID", value=selected_employee.get('user_id', '') or '')
+                    email = st.text_input("📧 Correo", value=selected_employee.get('email', '') or '')
+                    level = st.text_input("📊 Nivel", value=selected_employee.get('level', '') or '')
                 
                 with col2:
-                    phone = st.text_input("Teléfono", value=selected_employee.get('phone', ''))
-                    location = st.text_input("Ubicación", value=selected_employee.get('location', ''))
-                    shift = st.text_input("Turno", value=selected_employee.get('shift', ''))
-                    status = st.selectbox("Estatus", ["Activo", "Inactivo", "Baja"], 
-                                         index=["Activo", "Inactivo", "Baja"].index(selected_employee.get('status', 'Activo')))
+                    role_code = st.text_input("Código de rol", value=selected_employee.get('role_code', '') or '')
+                    role_description = st.text_input("👔 Rol", value=selected_employee.get('role_description', '') or '')
+                    cost_center_code = st.text_input("Código centro costos", value=selected_employee.get('cost_center_code', '') or '')
+                    cost_center_description = st.text_input("🏢 Centro de costos", value=selected_employee.get('cost_center_description', '') or '')
+                    shift_code = st.text_input("Código de turno", value=selected_employee.get('shift_code', '') or '')
+                    shift_description = st.text_input("⏰ Turno", value=selected_employee.get('shift_description', '') or '')
+                    supervisor_role = st.text_input("👑 Supervisor (S/N)", value=selected_employee.get('supervisor_role', '') or '')
                 
-                notes = st.text_area("Notas", value=selected_employee.get('notes', ''), height=100)
+                status_val = selected_employee.get('status', 'Activo') or 'Activo'
+                status_idx = ["Activo", "Inactivo", "Baja"].index(status_val) if status_val in ["Activo", "Inactivo", "Baja"] else 0
+                status = st.selectbox("📊 Estatus", ["Activo", "Inactivo", "Baja"], index=status_idx)
+                notes = st.text_area("📝 Notas", value=selected_employee.get('notes', '') or '', height=100)
                 
                 st.markdown("---")
                 
                 col1, col2 = st.columns(2)
                 with col1:
-                    if st.button("💾 Guardar Cambios", type="primary", use_container_width=True):
+                    if st.button("💾 Guardar Cambios", type="primary", width='stretch'):
                         updated_data = {
                             "name": name,
-                            "department": department,
-                            "role": role,
+                            "first_name": first_name,
+                            "last_name": last_name,
+                            "middle_name": middle_name,
+                            "user_id": user_id,
                             "email": email,
-                            "phone": phone,
-                            "location": location,
-                            "shift": shift,
+                            "level": level,
+                            "role_code": role_code,
+                            "role_description": role_description,
+                            "cost_center_code": cost_center_code,
+                            "cost_center_description": cost_center_description,
+                            "shift_code": shift_code,
+                            "shift_description": shift_description,
+                            "supervisor_role": supervisor_role,
                             "status": status,
                             "notes": notes,
                         }
@@ -1357,7 +1265,7 @@ def render_database_section():
                             st.error("❌ Error al actualizar empleado")
                 
                 with col2:
-                    if st.button("Cancelar", use_container_width=True):
+                    if st.button("Cancelar", width='stretch'):
                         pass
         
         except Exception as e:
@@ -1387,7 +1295,7 @@ def render_database_section():
                 
                 col1, col2 = st.columns(2)
                 with col1:
-                    if st.button("❌ Confirmar Eliminación", type="secondary", use_container_width=True):
+                    if st.button("❌ Confirmar Eliminación", type="secondary", width='stretch'):
                         if delete_employee(conn, selected_employee['id']):
                             st.success("✅ Empleado eliminado correctamente")
                             st.rerun()
@@ -1395,196 +1303,32 @@ def render_database_section():
                             st.error("❌ Error al eliminar empleado")
                 
                 with col2:
-                    if st.button("Cancelar", use_container_width=True):
+                    if st.button("Cancelar", width='stretch'):
                         pass
         
         except Exception as e:
             st.error(f"Error en eliminación: {str(e)}")
     
-    # ============================
-    # CONFIGURACIÓN - CRUD DE REFERENCIA
-    # ============================
-    elif operation == "⚙️ Configuración":
-        from repository import (
-            get_all_departments, add_department, update_department, delete_department,
-            get_all_roles_with_dept, add_role, update_role, delete_role, get_roles_by_department,
-            get_all_locations, add_location, update_location, delete_location
-        )
-        
-        st.subheader("⚙️ Configuración del Sistema")
-        st.info("Gestiona los departamentos, roles y ubicaciones disponibles en la aplicación.")
-        
-        # Selector de tipo de configuración
-        config_type = st.selectbox(
-            "¿Qué deseas configurar?",
-            ["Departamentos", "Roles", "Ubicaciones"]
-        )
-        
-        # ====== DEPARTAMENTOS ======
-        if config_type == "Departamentos":
-            st.markdown("### 🏢 Gestión de Departamentos")
-            
-            col1, col2 = st.columns([3, 1])
-            with col1:
-                new_dept = st.text_input("Nuevo departamento", key="new_department")
-            with col2:
-                if st.button("Agregar", use_container_width=True):
-                    if new_dept.strip():
-                        if add_department(conn, new_dept):
-                            st.success(f"✅ Departamento '{new_dept}' agregado")
-                            st.rerun()
-                        else:
-                            st.error("Error al agregar departamento")
-                    else:
-                        st.error("Campo requerido")
-            
-            st.markdown("---")
-            st.markdown("**Departamentos existentes:**")
-            
-            depts = get_all_departments(conn)
-            if depts:
-                for dept in depts:
-                    col1, col2, col3 = st.columns([3, 1, 1])
-                    with col1:
-                        st.write(f"**{dept['name']}**")
-                    
-                    with col2:
-                        new_name = st.text_input(f"Nuevo nombre", key=f"edit_dept_{dept['id']}", label_visibility="collapsed")
-                        if new_name and st.button("✏️", key=f"update_dept_{dept['id']}", use_container_width=True):
-                            if update_department(conn, dept['id'], new_name):
-                                st.success("Actualizado")
-                                st.rerun()
-                    
-                    with col3:
-                        if st.button("🗑️", key=f"delete_dept_{dept['id']}", use_container_width=True):
-                            if delete_department(conn, dept['id']):
-                                st.success("Eliminado")
-                                st.rerun()
-                            else:
-                                st.error("No se puede eliminar (tiene roles asociados)")
-            else:
-                st.info("No hay departamentos")
-        
-        # ====== ROLES ======
-        elif config_type == "Roles":
-            st.markdown("### 👔 Gestión de Roles")
-            
-            col1, col2, col3 = st.columns([2, 1, 1])
-            
-            with col1:
-                depts = get_all_departments(conn)
-                dept_options = [d['name'] for d in depts]
-                selected_dept = st.selectbox("Departamento", dept_options, key="role_dept_select")
-                selected_dept_id = next((d['id'] for d in depts if d['name'] == selected_dept), None)
-            
-            with col2:
-                new_role = st.text_input("Nuevo rol", key="new_role")
-            
-            with col3:
-                if st.button("Agregar", use_container_width=True):
-                    if new_role.strip() and selected_dept_id:
-                        if add_role(conn, new_role, selected_dept_id):
-                            st.success("✅ Rol agregado")
-                            st.rerun()
-                        else:
-                            st.error("Error al agregar rol")
-                    else:
-                        st.error("Campo requerido")
-            
-            st.markdown("---")
-            
-            if selected_dept_id:
-                st.markdown(f"**Roles en {selected_dept}:**")
-                roles = get_roles_by_department(conn, selected_dept_id)
-                
-                if roles:
-                    for role in roles:
-                        col1, col2, col3 = st.columns([2, 1, 1])
-                        
-                        with col1:
-                            st.write(f"• {role['name']}")
-                        
-                        with col2:
-                            new_name = st.text_input(f"Nuevo nombre", key=f"edit_role_{role['id']}", label_visibility="collapsed")
-                            if new_name and st.button("✏️", key=f"update_role_{role['id']}", use_container_width=True):
-                                if update_role(conn, role['id'], new_name, selected_dept_id):
-                                    st.success("Actualizado")
-                                    st.rerun()
-                        
-                        with col3:
-                            if st.button("🗑️", key=f"delete_role_{role['id']}", use_container_width=True):
-                                if delete_role(conn, role['id']):
-                                    st.success("Eliminado")
-                                    st.rerun()
-                                else:
-                                    st.error("No se puede eliminar (tiene empleados asociados)")
-                else:
-                    st.info("No hay roles en este departamento")
-        
-        # ====== UBICACIONES ======
-        elif config_type == "Ubicaciones":
-            st.markdown("### 📍 Gestión de Ubicaciones")
-            
-            col1, col2 = st.columns([3, 1])
-            with col1:
-                new_loc = st.text_input("Nueva ubicación", key="new_location")
-            with col2:
-                if st.button("Agregar", use_container_width=True):
-                    if new_loc.strip():
-                        if add_location(conn, new_loc):
-                            st.success(f"✅ Ubicación '{new_loc}' agregada")
-                            st.rerun()
-                        else:
-                            st.error("Error al agregar ubicación")
-                    else:
-                        st.error("Campo requerido")
-            
-            st.markdown("---")
-            st.markdown("**Ubicaciones existentes:**")
-            
-            locs = get_all_locations(conn)
-            if locs:
-                for loc in locs:
-                    col1, col2, col3 = st.columns([3, 1, 1])
-                    
-                    with col1:
-                        st.write(f"**{loc['name']}**")
-                    
-                    with col2:
-                        new_name = st.text_input(f"Nuevo nombre", key=f"edit_loc_{loc['id']}", label_visibility="collapsed")
-                        if new_name and st.button("✏️", key=f"update_loc_{loc['id']}", use_container_width=True):
-                            if update_location(conn, loc['id'], new_name):
-                                st.success("Actualizado")
-                                st.rerun()
-                    
-                    with col3:
-                        if st.button("🗑️", key=f"delete_loc_{loc['id']}", use_container_width=True):
-                            if delete_location(conn, loc['id']):
-                                st.success("Eliminado")
-                                st.rerun()
-                            else:
-                                st.error("No se puede eliminar (tiene empleados asociados)")
-            else:
-                st.info("No hay ubicaciones")
-    
     conn.close()
 
 
-def send_to_pi(employee_number: str, access_granted: bool) -> dict:
+def send_to_pi(employee_number: str, access_granted: bool, employee_name: str = "") -> dict:
     """Envía el resultado de verificación al PI Web Service."""
     import requests
 
     value = employee_number if access_granted else "0"
-    tag_and_value = f"ME14764-AXN.User|{value}"
+    name_value = employee_name if access_granted and employee_name else "0"
+    tag_user = f"ME14764-AXN.User|{value}"
+    tag_name = f"ME14764-AXN.User_Name|{name_value}"
+
+    pi_url = "http://nts5111/PI_FunctionalWS/PIWebService.asmx/Send_Functional_Master_To_PI"
+    headers = {"Content-Type": "application/x-www-form-urlencoded"}
 
     try:
-        resp = requests.post(
-            "http://nts5111/PI_FunctionalWS/PIWebService.asmx/Send_Functional_Master_To_PI",
-            data={"tag_and_value": tag_and_value},
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-            timeout=10,
-        )
-        return {"ok": resp.status_code == 200, "status": resp.status_code, "body": resp.text, "error": None}
+        resp1 = requests.post(pi_url, data={"tag_and_value": tag_user}, headers=headers, timeout=10)
+        resp2 = requests.post(pi_url, data={"tag_and_value": tag_name}, headers=headers, timeout=10)
+        ok = resp1.status_code == 200 and resp2.status_code == 200
+        return {"ok": ok, "status": resp1.status_code, "body": resp1.text, "error": None}
     except Exception as e:
         return {"ok": False, "status": None, "body": None, "error": str(e)}
 
@@ -1631,7 +1375,7 @@ def render_tracmex_section():
         with col2:
             parameter_name = st.text_input("Parameter Name", value="TRESS Certification")
 
-        submitted = st.form_submit_button("Consultar Estatus", use_container_width=True)
+        submitted = st.form_submit_button("Consultar Estatus", width='stretch')
 
     if submitted:
         if not user_id.strip():
@@ -1682,7 +1426,7 @@ def render_tracmex_config_section():
         key="admin_tracmex_pid",
     )
 
-    if st.button("💾 Guardar Process ID", type="primary", use_container_width=True):
+    if st.button("💾 Guardar Process ID", type="primary", width='stretch'):
         set_tracmex_process_id(int(new_pid))
         st.success(f"✅ Process ID actualizado a **{int(new_pid)}**")
         st.rerun()
@@ -1703,7 +1447,7 @@ def capture_frame_from_camera(camera_index: int = 0) -> Optional[np.ndarray]:
 
 def render_operator_section():
     """Sección para operadores: identificación 1:N en tiempo real con video continuo."""
-    st.header("🏭 Real Time Face Recognition")
+    #st.header("🏭 Real Time Face Recognition")
 
     # --- Inicializar estado (siempre activo) ---
     if "operator_active" not in st.session_state:
@@ -1711,15 +1455,6 @@ def render_operator_section():
 
     # Process ID leído de config persistente (solo admin puede cambiarlo)
     process_id = get_tracmex_process_id()
-
-    col_header, col_stop = st.columns([3, 1])
-    with col_header:
-        st.markdown("### 🔍 Reconocimiento automático activo")
-    with col_stop:
-        if st.button("⏹️ Detener", type="secondary", use_container_width=True):
-            send_to_pi("0", False)  # reset PI
-            st.session_state.operator_active = False
-            st.rerun()
 
     st.divider()
 
@@ -1795,7 +1530,7 @@ def render_operator_section():
                             cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2)
 
             annotated_rgb = cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB)
-            frame_placeholder.image(annotated_rgb, channels="RGB", use_container_width=True)
+            frame_placeholder.image(annotated_rgb, channels="RGB", width='stretch')
 
             # --- Identificación + TRAC_MEX cada 5 segundos ---
             if now - last_verify_time >= 5.0:
@@ -1828,7 +1563,10 @@ def render_operator_section():
 
                 # --- Enviar señal a PI ---
                 if certified_employee:
-                    pi_result = send_to_pi(certified_employee["employee_number"], True)
+                    pi_result = send_to_pi(
+                        certified_employee["employee_number"], True,
+                        certified_employee["employee_name"]
+                    )
                     value_sent = certified_employee["employee_number"]
                 else:
                     pi_result = send_to_pi("0", False)
@@ -1861,12 +1599,13 @@ def render_operator_section():
                         else:
                             st.error("## ❌ ACCESO DENEGADO")
 
-                    with detail_placeholder.container():
-                        for fr in last_face_results:
-                            if fr["certified"]:
-                                st.success(f"✅ {fr['name']} — Certificación válida")
-                            elif fr["matched"]:
-                                st.error(f"❌ {fr['name']} — Sin certificación")
+                    if certified_employee:
+                        with detail_placeholder.container():
+                            for fr in last_face_results:
+                                if fr["certified"]:
+                                    st.success(f"✅ {fr['name']} — Certificación válida")
+                                elif fr["matched"]:
+                                    st.error(f"❌ {fr['name']} — Sin certificación")
 
                     pi_placeholder.caption(f"📡 PI: {pi_msg}")
                     time_placeholder.caption(f"🕐 Última verificación: {time.strftime('%H:%M:%S')}")
@@ -1883,11 +1622,7 @@ def render_operator_section():
 def main():
     init_db()
 
-    st.title("Sistema Biométrico Facial")
-    st.markdown(
-        "V.0.0.1 | Arquitectura desacoplada: UI Streamlit + motor biométrico separado + "
-        "múltiples muestras por identidad + quality gate + verificación 1:1."
-    )
+    st.title("Facial Recognition with AI")
 
     # --- Gate de autenticación ---
     from repository import verify_admin_credentials
@@ -1909,7 +1644,7 @@ def main():
             st.sidebar.markdown("---")
             username = st.sidebar.text_input("Usuario", key="app_login_user")
             password = st.sidebar.text_input("Contraseña", type="password", key="app_login_pass")
-            if st.sidebar.button("🔑 Iniciar Sesión", use_container_width=True):
+            if st.sidebar.button("🔑 Iniciar Sesión", width='stretch'):
                 if verify_admin_credentials(username, password):
                     st.session_state.app_role = "admin"
                     st.rerun()
@@ -1918,7 +1653,7 @@ def main():
             # Main area message
             st.info("🔑 Ingresa tus credenciales de administrador en la barra lateral para acceder.")
         else:
-            if st.sidebar.button("▶️ Entrar como Operador", use_container_width=True):
+            if st.sidebar.button("▶️ Entrar como Operador", width='stretch'):
                 st.session_state.app_role = "operator"
                 st.rerun()
             st.info("👷 Presiona **Entrar como Operador** en la barra lateral para iniciar.")
@@ -1927,7 +1662,8 @@ def main():
     # --- Operador: solo verificación en tiempo real ---
     if st.session_state.app_role == "operator":
         st.sidebar.markdown(f"**Rol:** 👷 Operador")
-        if st.sidebar.button("🚪 Cerrar Sesión", use_container_width=True):
+        if st.sidebar.button("🚪 Cerrar Sesión", width='stretch'):
+            send_to_pi("0", False)  # reset PI al salir
             st.session_state.app_role = None
             st.session_state.operator_active = False
             st.rerun()
@@ -1936,7 +1672,7 @@ def main():
 
     # --- Administrador: menú completo ---
     st.sidebar.markdown(f"**Rol:** 🔑 Administrador")
-    if st.sidebar.button("🚪 Cerrar Sesión", use_container_width=True):
+    if st.sidebar.button("🚪 Cerrar Sesión", width='stretch'):
         st.session_state.app_role = None
         st.rerun()
 

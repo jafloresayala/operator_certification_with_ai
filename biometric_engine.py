@@ -186,7 +186,13 @@ class ArcFaceEngine(BiometricEngine):
     def _face_to_extracted(self, image_bgr: np.ndarray, face) -> Optional[ExtractedFace]:
         """Convierte un objeto face de InsightFace a ExtractedFace."""
         try:
-            x1, y1, x2, y2 = int(face.bbox[0]), int(face.bbox[1]), int(face.bbox[2]), int(face.bbox[3])
+            h, w = image_bgr.shape[:2]
+            x1 = max(0, int(face.bbox[0]))
+            y1 = max(0, int(face.bbox[1]))
+            x2 = min(w, int(face.bbox[2]))
+            y2 = min(h, int(face.bbox[3]))
+            if x2 <= x1 or y2 <= y1:
+                return None
             face_box = FaceBox(top=y1, bottom=y2, left=x1, right=x2)
             quality = self._check_image_quality(image_bgr, face_box)
             aligned_face = cv2.resize(image_bgr[y1:y2, x1:x2].copy(), (112, 112))
