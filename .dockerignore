@@ -1,0 +1,37 @@
+# Git
+.git
+.gitignore
+
+# Python
+__pycache__
+*.pyc
+*.pyo
+.pytest_cache
+
+# IDE
+.vscode
+.idea
+
+# Docker
+Dockerfile
+docker-compose.yml
+nginx.conf
+.dockerignore
+
+# Documentación
+*.md
+*.txt
+!requirements.txt
+
+# Scripts de migración y diagnóstico (no necesarios en producción)
+migrate_*.py
+diagnose_*.py
+cleanup_*.py
+complete_migration*.py
+clean_verification_logs.py
+validate_fix.py
+test_fixes.py
+add_ti_dept.py
+
+# Data (se monta como volumen, no se copia)
+data/

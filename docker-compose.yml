@@ -1,0 +1,27 @@
+services:
+  streamlit:
+    build: .
+    restart: always
+    expose:
+      - "8501"
+    volumes:
+      - ./data:/app/data                # Persistir base de datos SQLite
+      - ./reference_images:/app/reference_images  # Persistir fotos de enrolamiento
+    extra_hosts:
+      - "nts5111:10.132.17.35"          # PI Web Service
+      - "nts5102:10.132.12.82"          # TRESS API
+      - "nts5512:10.220.12.35"          # TRAC_MEX API
+    dns:
+      - 10.220.12.27                    # DNS corporativo (kei.keint.com)
+
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf
+      - ./ssl:/etc/nginx/ssl:ro         # Certificado SSL autofirmado
+    depends_on:
+      - streamlit
+    restart: always

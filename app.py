@@ -11,6 +11,7 @@ import face_recognition
 from typing import List, Optional, Tuple, Dict, Any
 from streamlit_webrtc import webrtc_streamer, WebRtcMode, VideoProcessorBase
 from PIL import Image
+from camera_input_live import camera_input_live
 
 from settings import SETTINGS, get_tracmex_process_id, set_tracmex_process_id
 from repository import init_db, list_employees_df, get_employee_by_number, get_db_connection as _get_db_conn
@@ -1445,178 +1446,231 @@ def capture_frame_from_camera(camera_index: int = 0) -> Optional[np.ndarray]:
     finally:
         cap.release()
 
-def render_operator_section():
-    """Sección para operadores: identificación 1:N en tiempo real con video continuo."""
-    #st.header("🏭 Real Time Face Recognition")
+def _process_identification(engine, frame_bgr, threshold, process_id):
+    """Ejecuta identificación 1:N + TRAC_MEX + PI. Retorna (face_results, certified_employee, pi_msg, diagnostics)."""
+    face_results = []
+    certified_employee = None
+    diagnostics = []
 
-    # --- Inicializar estado (siempre activo) ---
+    id_results = identify_faces_in_frame(engine, frame_bgr, threshold)
+    diagnostics.append(f"Rostros detectados: {len(id_results)}")
+
+    for i, r in enumerate(id_results):
+        entry = {
+            "face_box": r["face_box"],
+            "matched": r["matched"],
+            "name": r["employee_name"],
+            "emp_number": r["employee_number"],
+            "certified": False,
+        }
+
+        dist_str = f"{r.get('distance', 'N/A'):.4f}" if isinstance(r.get('distance'), (int, float)) else "N/A"
+        diagnostics.append(
+            f"Rostro #{i+1}: matched={r['matched']}, "
+            f"emp={r.get('employee_number', 'N/A')}, "
+            f"name={r.get('employee_name', 'N/A')}, "
+            f"distance={dist_str}, threshold={threshold}"
+        )
+
+        if r["matched"] and r["employee_number"]:
+            tr = check_tracmex_access(r["employee_number"], process_id=process_id)
+            diagnostics.append(
+                f"  TRAC_MEX(user_id={r['employee_number']}, process_id={process_id}): "
+                f"passed={tr.get('passed')}, msg={tr.get('message')}, err={tr.get('error')}"
+            )
+            if tr["passed"]:
+                entry["certified"] = True
+                if certified_employee is None:
+                    certified_employee = r
+
+        face_results.append(entry)
+
+    # Enviar señal a PI
+    if certified_employee:
+        pi_result = send_to_pi(
+            certified_employee["employee_number"], True,
+            certified_employee["employee_name"]
+        )
+        value_sent = certified_employee["employee_number"]
+    else:
+        pi_result = send_to_pi("0", False)
+        value_sent = "0"
+
+    if pi_result.get("ok"):
+        pi_msg = f"✅ Enviado ME14764-AXN.User|{value_sent}"
+    elif pi_result.get("error"):
+        pi_msg = f"❌ Error: {pi_result['error']}"
+    else:
+        pi_msg = f"❌ HTTP {pi_result['status']}"
+
+    return face_results, certified_employee, pi_msg, diagnostics
+
+
+def _render_identification_results(status_placeholder, detail_placeholder, pi_placeholder,
+                                    time_placeholder, face_results, certified_employee, pi_msg,
+                                    diagnostics=None):
+    """Muestra los resultados de identificación en los placeholders."""
+    status_placeholder.empty()
+    detail_placeholder.empty()
+
+    if not face_results:
+        pi_placeholder.caption(f"📡 PI: {pi_msg}")
+        time_placeholder.caption(f"🕐 Última verificación: {time.strftime('%H:%M:%S')}")
+    else:
+        with status_placeholder.container():
+            if certified_employee:
+                st.success(
+                    f"## ✅ ACCESO PERMITIDO\n"
+                    f"### 👤 {certified_employee['employee_name']}\n"
+                    f"No. {certified_employee['employee_number']}"
+                )
+            else:
+                st.error("## ❌ ACCESO DENEGADO")
+
+        with detail_placeholder.container():
+            for fr in face_results:
+                if fr["certified"]:
+                    st.success(f"✅ {fr['name']} — Certificación válida")
+                elif fr["matched"]:
+                    st.error(f"❌ {fr['name']} — Sin certificación TRAC_MEX")
+                else:
+                    st.warning(f"⚠️ Rostro no identificado (no coincide con ningún empleado)")
+
+            if diagnostics:
+                with st.expander("🔧 Diagnóstico detallado", expanded=False):
+                    for line in diagnostics:
+                        st.text(line)
+
+        pi_placeholder.caption(f"📡 PI: {pi_msg}")
+        time_placeholder.caption(f"🕐 Última verificación: {time.strftime('%H:%M:%S')}")
+
+
+def _annotate_frame(frame_bgr, face_results):
+    """Dibuja bounding boxes y etiquetas sobre el frame."""
+    annotated = frame_bgr.copy()
+    for fr in face_results:
+        fb = fr["face_box"]
+        top, right, bottom, left = fb.top, fb.right, fb.bottom, fb.left
+        if fr["certified"]:
+            color = (0, 255, 0)
+            label = fr["name"] or "Certificado"
+        elif fr["matched"]:
+            color = (0, 0, 255)
+            label = f"{fr['name'] or 'Sin cert.'} - NO CERT."
+        else:
+            color = (0, 0, 255)
+            label = "DESCONOCIDO"
+
+        cv2.rectangle(annotated, (left, top), (right, bottom), color, 3)
+        cv2.rectangle(annotated, (left, bottom), (right, bottom + 35), color, -1)
+        cv2.putText(annotated, label, (left + 6, bottom + 25),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2)
+    return annotated
+
+
+def _render_operator_browser(engine, threshold, process_id):
+    """Modo Navegador: usa camera_input_live con @st.fragment para evitar rerun global."""
+
+    # Inicializar estado persistente una sola vez
+    for key, default in [
+        ("browser_last_verify_time", 0.0),
+        ("browser_last_results", []),
+        ("browser_last_certified", None),
+        ("browser_last_pi_msg", ""),
+        ("browser_last_diagnostics", []),
+    ]:
+        if key not in st.session_state:
+            st.session_state[key] = default
+
+    # --- Todo dentro del fragment para que se actualice junto ---
+    @st.fragment(run_every=5)
+    def _camera_fragment():
+        col_cam, col_result = st.columns([1, 1])
+
+        with col_cam:
+            image = camera_input_live(
+                key="operator_browser_cam",
+                show_controls=False,
+                debounce=4000,
+            )
+
+            if image is not None:
+                pil_image = Image.open(image)
+                frame_bgr = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
+
+                now = time.time()
+                if now - st.session_state.browser_last_verify_time >= 5.0:
+                    st.session_state.browser_last_verify_time = now
+                    face_results, certified_employee, pi_msg, diag = _process_identification(
+                        engine, frame_bgr, threshold, process_id
+                    )
+                    st.session_state.browser_last_results = face_results
+                    st.session_state.browser_last_certified = certified_employee
+                    st.session_state.browser_last_pi_msg = pi_msg
+                    st.session_state.browser_last_diagnostics = diag
+
+                # Anotar frame con los resultados actuales
+                annotated = _annotate_frame(frame_bgr, st.session_state.browser_last_results)
+                annotated_rgb = cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB)
+                st.image(annotated_rgb, channels="RGB", width="stretch")
+            else:
+                st.info("📷 Esperando cámara del navegador...")
+
+        with col_result:
+            face_results = st.session_state.browser_last_results
+            certified_employee = st.session_state.browser_last_certified
+            pi_msg = st.session_state.browser_last_pi_msg
+            diagnostics = st.session_state.browser_last_diagnostics
+
+            if not face_results and not pi_msg:
+                st.info("📷 Video en vivo — verificación cada 5 segundos")
+            else:
+                if certified_employee:
+                    st.success(
+                        f"## ✅ ACCESO PERMITIDO\n"
+                        f"### 👤 {certified_employee['employee_name']}\n"
+                        f"No. {certified_employee['employee_number']}"
+                    )
+                else:
+                    st.error("## ❌ ACCESO DENEGADO")
+
+                for fr in face_results:
+                    if fr["certified"]:
+                        st.success(f"✅ {fr['name']} — Certificación válida")
+                    elif fr["matched"]:
+                        st.error(f"❌ {fr['name']} — Sin certificación TRAC_MEX")
+                    else:
+                        st.warning(f"⚠️ Rostro no identificado")
+
+                if diagnostics:
+                    with st.expander("🔧 Diagnóstico detallado", expanded=False):
+                        for line in diagnostics:
+                            st.text(line)
+
+                st.caption(f"📡 PI: {pi_msg}")
+                st.caption(f"🕐 Última verificación: {time.strftime('%H:%M:%S')}")
+
+    _camera_fragment()
+
+
+def render_operator_section():
+    """Sección para operadores: identificación 1:N en tiempo real."""
+
     if "operator_active" not in st.session_state:
         st.session_state.operator_active = True
 
-    # Process ID leído de config persistente (solo admin puede cambiarlo)
     process_id = get_tracmex_process_id()
 
     st.divider()
 
-    # Layout: video a la izquierda, resultados a la derecha
-    col_cam, col_result = st.columns([1, 1])
-    with col_cam:
-        frame_placeholder = st.empty()
-    with col_result:
-        status_placeholder = st.empty()
-        detail_placeholder = st.empty()
-        pi_placeholder = st.empty()
-        time_placeholder = st.empty()
-
-    # Cargar engine una vez
     engine = get_biometric_engine()
     if engine is None:
-        status_placeholder.error("❌ Motor biométrico no disponible.")
+        st.error("❌ Motor biométrico no disponible.")
         return
-
-    # Abrir cámara con reintentos (la cámara puede tardar en inicializar)
-    cap = None
-    for attempt in range(5):
-        cap = cv2.VideoCapture(0)
-        if cap.isOpened():
-            break
-        cap.release()
-        cap = None
-        time.sleep(0.5)
-
-    if cap is None or not cap.isOpened():
-        status_placeholder.error("❌ No se pudo acceder a la cámara.")
-        return
-
-    # Descartar los primeros frames (la cámara puede devolver frames negros al inicio)
-    for _ in range(10):
-        cap.read()
 
     threshold = float(SETTINGS.DEFAULT_THRESHOLD)
-    last_verify_time = 0.0
 
-    # Estado de la última identificación (para anotar frames entre ciclos)
-    last_face_results = []   # lista de dicts con face_box, matched, name, certified, emp_number
-    pi_msg = ""
-
-    try:
-        while cap.isOpened():
-            ret, frame_bgr = cap.read()
-            if not ret:
-                time.sleep(0.05)
-                continue
-
-            now = time.time()
-
-            # --- Anotar frame con los resultados de la última identificación ---
-            annotated = frame_bgr.copy()
-            for fr in last_face_results:
-                fb = fr["face_box"]
-                top, right, bottom, left = fb.top, fb.right, fb.bottom, fb.left
-                if fr["certified"]:
-                    color = (0, 255, 0)  # Verde
-                    label = fr["name"] or "Certificado"
-                elif fr["matched"]:
-                    color = (0, 0, 255)  # Rojo — identificado pero sin certificación
-                    label = f"{fr['name'] or 'Sin cert.'} - NO CERT."
-                else:
-                    color = (0, 0, 255)  # Rojo — desconocido
-                    label = "DESCONOCIDO"
-
-                cv2.rectangle(annotated, (left, top), (right, bottom), color, 3)
-                # Fondo de etiqueta
-                cv2.rectangle(annotated, (left, bottom), (right, bottom + 35), color, -1)
-                cv2.putText(annotated, label, (left + 6, bottom + 25),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2)
-
-            annotated_rgb = cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB)
-            frame_placeholder.image(annotated_rgb, channels="RGB", width='stretch')
-
-            # --- Identificación + TRAC_MEX cada 5 segundos ---
-            if now - last_verify_time >= 5.0:
-                last_verify_time = now
-                last_face_results = []
-
-                # 1:N Identificación
-                id_results = identify_faces_in_frame(engine, frame_bgr, threshold)
-
-                certified_employee = None  # el primer empleado con certificación válida
-
-                for r in id_results:
-                    entry = {
-                        "face_box": r["face_box"],
-                        "matched": r["matched"],
-                        "name": r["employee_name"],
-                        "emp_number": r["employee_number"],
-                        "certified": False,
-                    }
-
-                    if r["matched"] and r["employee_number"]:
-                        # Consultar TRAC_MEX para este empleado
-                        tr = check_tracmex_access(r["employee_number"], process_id=process_id)
-                        if tr["passed"]:
-                            entry["certified"] = True
-                            if certified_employee is None:
-                                certified_employee = r
-
-                    last_face_results.append(entry)
-
-                # --- Enviar señal a PI ---
-                if certified_employee:
-                    pi_result = send_to_pi(
-                        certified_employee["employee_number"], True,
-                        certified_employee["employee_name"]
-                    )
-                    value_sent = certified_employee["employee_number"]
-                else:
-                    pi_result = send_to_pi("0", False)
-                    value_sent = "0"
-
-                if pi_result.get("ok"):
-                    pi_msg = f"✅ Enviado ME14764-AXN.User|{value_sent}"
-                elif pi_result.get("error"):
-                    pi_msg = f"❌ Error: {pi_result['error']}"
-                else:
-                    pi_msg = f"❌ HTTP {pi_result['status']}"
-
-                # --- Actualizar panel de resultados ---
-                # Siempre limpiar antes de reconstruir para evitar mensajes residuales
-                status_placeholder.empty()
-                detail_placeholder.empty()
-
-                if not id_results:
-                    # Sin rostros: solo PI y timestamp
-                    pi_placeholder.caption(f"📡 PI: {pi_msg}")
-                    time_placeholder.caption(f"🕐 Última verificación: {time.strftime('%H:%M:%S')}")
-                else:
-                    with status_placeholder.container():
-                        if certified_employee:
-                            st.success(
-                                f"## ✅ ACCESO PERMITIDO\n"
-                                f"### 👤 {certified_employee['employee_name']}\n"
-                                f"No. {certified_employee['employee_number']}"
-                            )
-                        else:
-                            st.error("## ❌ ACCESO DENEGADO")
-
-                    if certified_employee:
-                        with detail_placeholder.container():
-                            for fr in last_face_results:
-                                if fr["certified"]:
-                                    st.success(f"✅ {fr['name']} — Certificación válida")
-                                elif fr["matched"]:
-                                    st.error(f"❌ {fr['name']} — Sin certificación")
-
-                    pi_placeholder.caption(f"📡 PI: {pi_msg}")
-                    time_placeholder.caption(f"🕐 Última verificación: {time.strftime('%H:%M:%S')}")
-
-            # ~15 FPS para video fluido sin saturar CPU
-            time.sleep(0.066)
-
-    finally:
-        cap.release()
-        # Siempre enviar 0 a PI al terminar
-        send_to_pi("0", False)
+    _render_operator_browser(engine, threshold, process_id)
 
 
 def main():
