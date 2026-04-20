@@ -1313,14 +1313,15 @@ def render_database_section():
     conn.close()
 
 
-def send_to_pi(employee_number: str, access_granted: bool, employee_name: str = "") -> dict:
+def send_to_pi(employee_number: str, access_granted: bool, employee_name: str = "",
+               pi_tag_user: str = "ME14764-AXN.User", pi_tag_name: str = "ME14764-AXN.User_Name") -> dict:
     """Envía el resultado de verificación al PI Web Service."""
     import requests
 
     value = employee_number if access_granted else "0"
     name_value = employee_name if access_granted and employee_name else "0"
-    tag_user = f"ME14764-AXN.User|{value}"
-    tag_name = f"ME14764-AXN.User_Name|{name_value}"
+    tag_user = f"{pi_tag_user}|{value}"
+    tag_name = f"{pi_tag_name}|{name_value}"
 
     pi_url = "http://nts5111/PI_FunctionalWS/PIWebService.asmx/Send_Functional_Master_To_PI"
     headers = {"Content-Type": "application/x-www-form-urlencoded"}
@@ -1405,31 +1406,62 @@ def render_tracmex_section():
             st.error(f"Error inesperado: {e}")
 
 
+def _init_session_pi_config():
+    """Inicializa la configuración de PI por sesión con valores por defecto."""
+    if "session_process_id" not in st.session_state:
+        st.session_state.session_process_id = get_tracmex_process_id()
+    if "session_pi_tag_user" not in st.session_state:
+        st.session_state.session_pi_tag_user = "ME14764-AXN.User"
+    if "session_pi_tag_name" not in st.session_state:
+        st.session_state.session_pi_tag_name = "ME14764-AXN.User_Name"
+
+
 def render_tracmex_config_section():
-    """Sección de administrador para configurar el Process ID de TRAC_MEX."""
+    """Sección para configurar Process ID y tags PI (por sesión/navegador)."""
+    _init_session_pi_config()
+
     st.header("⚙️ Configuración TRAC_MEX")
     st.info(
-        "Configura el **Process ID** que se usará en la validación automática del operador. "
-        "Este valor se guarda de forma persistente y el operador **no puede modificarlo**."
+        "Configura el **Process ID** y los **Tags de PI** para esta sesión. "
+        "Cada navegador/computadora mantiene su propia configuración de forma independiente."
     )
 
-    current_pid = get_tracmex_process_id()
-
-    st.metric("Process ID actual", current_pid)
+    st.metric("Process ID actual", st.session_state.session_process_id)
+    st.caption(f"Tag Empleado: `{st.session_state.session_pi_tag_user}`")
+    st.caption(f"Tag Nombre: `{st.session_state.session_pi_tag_name}`")
 
     st.markdown("---")
-    st.subheader("Cambiar Process ID")
+    st.subheader("Cambiar configuración")
 
     new_pid = st.number_input(
         "Nuevo Process ID",
-        value=current_pid,
+        value=st.session_state.session_process_id,
         step=1,
         key="admin_tracmex_pid",
     )
 
-    if st.button("💾 Guardar Process ID", type="primary", width='stretch'):
-        set_tracmex_process_id(int(new_pid))
-        st.success(f"✅ Process ID actualizado a **{int(new_pid)}**")
+    new_tag_user = st.text_input(
+        "Tag PI — Número de Empleado",
+        value=st.session_state.session_pi_tag_user,
+        key="admin_pi_tag_user",
+    )
+
+    new_tag_name = st.text_input(
+        "Tag PI — Nombre de Empleado",
+        value=st.session_state.session_pi_tag_name,
+        key="admin_pi_tag_name",
+    )
+
+    if st.button("💾 Guardar Configuración", type="primary", width='stretch'):
+        st.session_state.session_process_id = int(new_pid)
+        st.session_state.session_pi_tag_user = new_tag_user.strip()
+        st.session_state.session_pi_tag_name = new_tag_name.strip()
+        st.success(
+            f"✅ Configuración guardada para esta sesión:\n\n"
+            f"- Process ID: **{int(new_pid)}**\n"
+            f"- Tag Empleado: **{new_tag_user.strip()}**\n"
+            f"- Tag Nombre: **{new_tag_name.strip()}**"
+        )
         st.rerun()
 
 
@@ -1446,7 +1478,8 @@ def capture_frame_from_camera(camera_index: int = 0) -> Optional[np.ndarray]:
     finally:
         cap.release()
 
-def _process_identification(engine, frame_bgr, threshold, process_id):
+def _process_identification(engine, frame_bgr, threshold, process_id,
+                            pi_tag_user="ME14764-AXN.User", pi_tag_name="ME14764-AXN.User_Name"):
     """Ejecuta identificación 1:N + TRAC_MEX + PI. Retorna (face_results, certified_employee, pi_msg, diagnostics)."""
     face_results = []
     certified_employee = None
@@ -1489,15 +1522,16 @@ def _process_identification(engine, frame_bgr, threshold, process_id):
     if certified_employee:
         pi_result = send_to_pi(
             certified_employee["employee_number"], True,
-            certified_employee["employee_name"]
+            certified_employee["employee_name"],
+            pi_tag_user=pi_tag_user, pi_tag_name=pi_tag_name
         )
         value_sent = certified_employee["employee_number"]
     else:
-        pi_result = send_to_pi("0", False)
+        pi_result = send_to_pi("0", False, pi_tag_user=pi_tag_user, pi_tag_name=pi_tag_name)
         value_sent = "0"
 
     if pi_result.get("ok"):
-        pi_msg = f"✅ Enviado ME14764-AXN.User|{value_sent}"
+        pi_msg = f"✅ Enviado {pi_tag_user}|{value_sent}"
     elif pi_result.get("error"):
         pi_msg = f"❌ Error: {pi_result['error']}"
     else:
@@ -1568,7 +1602,8 @@ def _annotate_frame(frame_bgr, face_results):
     return annotated
 
 
-def _render_operator_browser(engine, threshold, process_id):
+def _render_operator_browser(engine, threshold, process_id,
+                             pi_tag_user="ME14764-AXN.User", pi_tag_name="ME14764-AXN.User_Name"):
     """Modo Navegador: usa camera_input_live con @st.fragment para evitar rerun global."""
 
     # Inicializar estado persistente una sola vez
@@ -1602,7 +1637,8 @@ def _render_operator_browser(engine, threshold, process_id):
                 if now - st.session_state.browser_last_verify_time >= 5.0:
                     st.session_state.browser_last_verify_time = now
                     face_results, certified_employee, pi_msg, diag = _process_identification(
-                        engine, frame_bgr, threshold, process_id
+                        engine, frame_bgr, threshold, process_id,
+                        pi_tag_user=pi_tag_user, pi_tag_name=pi_tag_name
                     )
                     st.session_state.browser_last_results = face_results
                     st.session_state.browser_last_certified = certified_employee
@@ -1659,7 +1695,10 @@ def render_operator_section():
     if "operator_active" not in st.session_state:
         st.session_state.operator_active = True
 
-    process_id = get_tracmex_process_id()
+    _init_session_pi_config()
+    process_id = st.session_state.session_process_id
+    pi_tag_user = st.session_state.session_pi_tag_user
+    pi_tag_name = st.session_state.session_pi_tag_name
 
     st.divider()
 
@@ -1670,7 +1709,7 @@ def render_operator_section():
 
     threshold = float(SETTINGS.DEFAULT_THRESHOLD)
 
-    _render_operator_browser(engine, threshold, process_id)
+    _render_operator_browser(engine, threshold, process_id, pi_tag_user, pi_tag_name)
 
 
 def main():
@@ -1717,7 +1756,10 @@ def main():
     if st.session_state.app_role == "operator":
         st.sidebar.markdown(f"**Rol:** 👷 Operador")
         if st.sidebar.button("🚪 Cerrar Sesión", width='stretch'):
-            send_to_pi("0", False)  # reset PI al salir
+            _init_session_pi_config()
+            send_to_pi("0", False,
+                       pi_tag_user=st.session_state.session_pi_tag_user,
+                       pi_tag_name=st.session_state.session_pi_tag_name)
             st.session_state.app_role = None
             st.session_state.operator_active = False
             st.rerun()
